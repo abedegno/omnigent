@@ -741,6 +741,8 @@ def _ensure_builtin_backends() -> None:
         from . import bwrap_sandbox  # noqa: F401
     if "darwin_seatbelt" not in _BACKENDS:
         from . import seatbelt_sandbox  # noqa: F401
+    if "linux_landlock" not in _BACKENDS:
+        from . import landlock_sandbox  # noqa: F401
 
 
 def _default_sandbox_for_platform() -> OSEnvSandboxSpec:
