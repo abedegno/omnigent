@@ -72,6 +72,14 @@ jobs:
 
       # 2. Regenerate ap-web/package-lock.json against public npm. Lockfile
       #    only (the Docker build does the full install) — fast, deterministic.
+      #    The 7-day dependency cooldown comes from ap-web/.npmrc
+      #    (`min-release-age=7`, the npm mirror of uv.toml's
+      #    `exclude-newer = "P7D"`); it is only honored by npm >= 11.10.0,
+      #    and node 20 ships npm 10.x, so install a new-enough npm first or
+      #    the cooldown is silently ignored and the lock can pin a release
+      #    too fresh for the downstream JFrog mirror to serve.
+      - name: Ensure npm honors the dependency cooldown
+        run: npm install -g "npm@>=11.10.0"
       - name: Regenerate package-lock.json
         working-directory: ap-web
         run: npm install --package-lock-only --no-audit --no-fund
