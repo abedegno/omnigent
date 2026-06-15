@@ -225,13 +225,20 @@ def test_file_mask_excludes_directory_only_bits() -> None:
 
 def test_add_path_rule_skips_missing_path() -> None:
     """
-    A non-existent granted path (``ENOENT``) is skipped, not fatal — the
-    spec may name a path that hasn't been created yet. No syscall is
-    issued (the open fails first), so a stub libc is fine.
+    A non-existent granted path is skipped, not fatal — the spec may name
+    a path that hasn't been created yet. Both ``ENOENT`` (the path
+    itself) and ``ENOTDIR`` (an intermediate component isn't a directory)
+    are skippable. No syscall is issued (the open fails first), so a stub
+    libc is fine.
     """
+    # ENOENT — the granted path does not exist.
     with patch("omnigent.inner.landlock_sandbox.os.open", side_effect=FileNotFoundError()):
         # Must not raise.
         _add_path_rule(object(), 445, 3, Path("/does/not/exist"), 0b110, 0b110)  # type: ignore[arg-type]
+    # ENOTDIR — an intermediate path component is not a directory.
+    with patch("omnigent.inner.landlock_sandbox.os.open", side_effect=NotADirectoryError()):
+        # Must not raise.
+        _add_path_rule(object(), 445, 3, Path("/etc/hosts/nope"), 0b110, 0b110)  # type: ignore[arg-type]
 
 
 def test_add_path_rule_raises_on_non_skippable_oserror() -> None:

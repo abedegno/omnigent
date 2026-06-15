@@ -38,9 +38,16 @@ handled right exercised on a path that no rule grants is denied with
 ``EACCES`` / ``EPERM``. Rights that are not handled are not restricted at
 all. We exploit that to express write-confinement cheaply:
 
-- **Write roots / write files** get the full handled mask (read + write
-  classes), so the helper can create, modify, delete, and traverse
+- **Write roots** are directories and get the full handled mask (read +
+  write classes), so the helper can create, modify, delete, and traverse
   inside them.
+- **Write files** are regular files and get only the *file-applicable*
+  subset (``EXECUTE | READ_FILE | WRITE_FILE`` plus ABI-gated
+  ``TRUNCATE`` / ``IOCTL_DEV``). Handing a directory-only right
+  (``READ_DIR``, ``MAKE_*``, ``REMOVE_*``, ``REFER``) to
+  ``landlock_add_rule`` on a regular-file ``parent_fd`` fails with
+  ``EINVAL``. ``_add_path_rule`` also ``fstat``s every ``parent_fd`` and
+  clamps any non-directory to the file mask as defense in depth.
 - **Read roots** (when the spec restricts reads) get the read-class
   rights only.
 - Everything else is denied for whatever class is handled.
