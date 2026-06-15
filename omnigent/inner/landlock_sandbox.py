@@ -108,6 +108,7 @@ import errno
 import logging
 import os
 import platform
+import stat
 import sys
 from pathlib import Path
 
@@ -189,6 +190,19 @@ _FS_WRITE_BASE = (
     | _LANDLOCK_ACCESS_FS_MAKE_FIFO
     | _LANDLOCK_ACCESS_FS_MAKE_BLOCK
     | _LANDLOCK_ACCESS_FS_MAKE_SYM
+)
+
+# File-applicable rights for ABI 1 — the subset of access rights the
+# kernel accepts on a ``PATH_BENEATH`` rule whose ``parent_fd`` is a
+# *regular file* (not a directory). Passing any directory-only right
+# (READ_DIR, the MAKE_*/REMOVE_* family, REFER) for a file makes
+# ``landlock_add_rule`` fail with EINVAL (see man landlock_add_rule), so
+# per-file grants (``write_files``) and file-shaped read/write roots are
+# clamped to this set. TRUNCATE (ABI 3) and IOCTL_DEV (ABI 5) are layered
+# on per ABI in :func:`_fs_file_mask_for_abi`. EXECUTE is ABI 1 and
+# always applicable to files.
+_FS_FILE_BASE = (
+    _LANDLOCK_ACCESS_FS_EXECUTE | _LANDLOCK_ACCESS_FS_READ_FILE | _LANDLOCK_ACCESS_FS_WRITE_FILE
 )
 
 # O_PATH | O_CLOEXEC for opening rule parent directories. O_PATH yields a
@@ -325,6 +339,41 @@ def _fs_write_mask_for_abi(abi: int) -> int:
         mask |= _LANDLOCK_ACCESS_FS_TRUNCATE
     if abi >= 5:
         mask |= _LANDLOCK_ACCESS_FS_IOCTL_DEV
+    # Intentional ABI-scoped decision: we only OR in the bits this module
+    # knows about (up to IOCTL_DEV / ABI 5). Filesystem rights added in
+    # ABIs newer than what this code defines — and on kernels reporting an
+    # ABI higher than 6 — are simply left UNHANDLED, i.e. unrestricted,
+    # rather than enforced. ``handled_access_fs`` is clamped to the
+    # detected ABI either way (passing an unknown bit fails with EINVAL),
+    # so the floor is "we never crash on a new kernel" and the ceiling is
+    # "we enforce exactly the rights we understand". Picking up newer
+    # rights is a deliberate follow-up, not an automatic widening.
+    return mask
+
+
+def _fs_file_mask_for_abi(abi: int) -> int:
+    """
+    File-applicable access rights supported by *abi*.
+
+    The subset of rights the kernel accepts on a ``PATH_BENEATH`` rule
+    whose ``parent_fd`` is a regular file. Used for per-file grants
+    (``write_files``) and as the defense-in-depth clamp in
+    :func:`_add_path_rule` for any non-directory path: directory-only
+    rights (READ_DIR, MAKE_*/REMOVE_*, REFER) would make
+    ``landlock_add_rule`` fail with ``EINVAL`` on a file.
+
+    TRUNCATE (ABI 3) and IOCTL_DEV (ABI 5) are file-applicable and layered
+    on per ABI; the directory-creation/removal family is deliberately
+    excluded.
+
+    :param abi: Detected Landlock ABI version (``>= 1``).
+    :returns: The file-applicable ``LANDLOCK_ACCESS_FS_*`` mask for *abi*.
+    """
+    mask = _FS_FILE_BASE
+    if abi >= 3:
+        mask |= _LANDLOCK_ACCESS_FS_TRUNCATE
+    if abi >= 5:
+        mask |= _LANDLOCK_ACCESS_FS_IOCTL_DEV
     return mask
 
 
@@ -429,9 +478,15 @@ class LandlockSandboxBackend(SandboxBackend):
            ABI. The write-class is always handled; the read-class is
            handled only when ``read_roots`` restricts reads.
         3. Create the ruleset, add one ``PATH_BENEATH`` rule per
-           write/read root and write file (write roots/files get the full
-           handled mask; read roots get the read class), then
-           ``PR_SET_NO_NEW_PRIVS`` + ``landlock_restrict_self``.
+           write/read root and write file. Directory roots (write/read
+           roots) get the full handled / read mask; ``write_files`` get
+           the **file-applicable** subset only — passing a directory-only
+           right (MAKE_DIR, READ_DIR, REFER, …) on a regular-file
+           ``parent_fd`` makes ``landlock_add_rule`` fail with EINVAL.
+           :func:`_add_path_rule` additionally ``fstat``s every parent_fd
+           and clamps non-directories to the file mask as defense in
+           depth. Finally ``PR_SET_NO_NEW_PRIVS`` +
+           ``landlock_restrict_self``.
 
         :param policy: The resolved :class:`SandboxPolicy`. Consulted for
             ``read_roots`` (regime selector), ``write_roots``, and
@@ -465,6 +520,7 @@ class LandlockSandboxBackend(SandboxBackend):
 
         read_mask = _fs_read_mask_for_abi(abi)
         write_mask = _fs_write_mask_for_abi(abi)
+        file_mask = _fs_file_mask_for_abi(abi)
         restrict_reads = policy.read_roots is not None
 
         # Handled mask: always confine writes; confine reads only when the
@@ -491,18 +547,27 @@ class LandlockSandboxBackend(SandboxBackend):
             raise OSError(err, f"landlock_create_ruleset failed: {os.strerror(err)}")
 
         try:
-            # Write roots and write files: grant the entire handled mask
-            # (write class + read class when reads are restricted). For a
-            # regular file the dir-only bits are simply inert.
-            for path in [*policy.write_roots, *policy.write_files]:
-                _add_path_rule(libc, add_rule, ruleset_fd, path, handled)
+            # Write roots are directories: grant the entire handled mask
+            # (write class + read class when reads are restricted).
+            for path in policy.write_roots:
+                _add_path_rule(libc, add_rule, ruleset_fd, path, handled, file_mask)
+
+            # Write files are regular files: grant only the file-applicable
+            # WRITE+READ subset (intersected with the handled mask). Passing
+            # the full handled mask here — which carries directory-only bits
+            # like MAKE_REG / REFER — makes landlock_add_rule return EINVAL
+            # on a regular-file parent_fd and aborts activation.
+            for path in policy.write_files:
+                _add_path_rule(libc, add_rule, ruleset_fd, path, file_mask & handled, file_mask)
 
             # Read roots: grant the read class only (intersected with the
             # handled mask). Skipped entirely when reads are unrestricted
             # — there is nothing to re-allow because reads aren't handled.
             if restrict_reads:
                 for path in policy.read_roots or []:
-                    _add_path_rule(libc, add_rule, ruleset_fd, path, read_mask & handled)
+                    _add_path_rule(
+                        libc, add_rule, ruleset_fd, path, read_mask & handled, file_mask
+                    )
 
             _set_no_new_privs(libc)
 
@@ -535,43 +600,67 @@ def _add_path_rule(
     ruleset_fd: int,
     path: Path,
     allowed_access: int,
+    file_mask: int,
 ) -> None:
     """
     Add one ``LANDLOCK_RULE_PATH_BENEATH`` rule granting *allowed_access*
     to the hierarchy rooted at *path*.
 
     Opens *path* with ``O_PATH | O_CLOEXEC`` for the rule's
-    ``parent_fd``. A path that doesn't exist is logged and skipped (the
-    spec may grant a path that hasn't been created yet) rather than
-    aborting the whole activation.
+    ``parent_fd``, then ``fstat``s it: if the path is NOT a directory the
+    requested *allowed_access* is intersected with *file_mask* before the
+    syscall, so a directory-only right never reaches the kernel for a
+    regular file (which would fail with ``EINVAL``). This makes the call
+    correct regardless of which policy list the path came from.
+
+    Skippable failures vs fail-loud:
+
+    - A **non-existent** path (``ENOENT``) — or an ``ENOTDIR`` where an
+      intermediate path component isn't a directory — is logged and
+      skipped: a spec may grant a path that hasn't been created yet, and
+      that is not a security-relevant policy loss.
+    - **Any other** ``OSError`` (``EACCES``, ``ELOOP``, ``EMFILE``, an
+      unexpected ``landlock_add_rule`` errno, …) is RAISED. Silently
+      dropping a requested allow rule would leave the helper running
+      under a weaker-than-requested policy — a fail-closed contract, kept
+      deliberately distinct from the Landlock-absent degrade-open path in
+      :meth:`LandlockSandboxBackend.activate`.
 
     :param libc: The shared ``CDLL(None)`` handle.
     :param add_rule_nr: ``landlock_add_rule`` syscall number for the arch.
     :param ruleset_fd: Open ruleset fd from ``landlock_create_ruleset``.
     :param path: Filesystem hierarchy root to grant access to.
     :param allowed_access: Subset of the ruleset's handled mask to grant.
-    :raises OSError: When ``landlock_add_rule`` fails for a reason other
-        than the path being absent (e.g. ``EINVAL`` from a mask bug).
+    :param file_mask: File-applicable mask (:func:`_fs_file_mask_for_abi`)
+        used to clamp *allowed_access* when *path* is not a directory.
+    :raises OSError: When opening or adding the rule fails for any reason
+        other than a non-existent path (fail-closed).
     """
     if allowed_access == 0:
         return
     try:
         parent_fd = os.open(str(path), _O_PATH | _O_CLOEXEC)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        # ENOENT / ENOTDIR — the granted path (or an intermediate
+        # component) doesn't exist. Skippable: the spec may name a path
+        # that hasn't been created yet. NOT a silent policy loss for a
+        # path that exists but we couldn't open.
         _LOGGER.info(
-            "linux_landlock: skipping rule for %s (path does not exist)",
-            path,
-        )
-        return
-    except OSError as exc:
-        _LOGGER.warning(
-            "linux_landlock: skipping rule for %s (open O_PATH failed: %s)",
+            "linux_landlock: skipping rule for %s (path does not exist: %s)",
             path,
             exc,
         )
         return
 
     try:
+        # Clamp to file-applicable rights when the parent is a regular
+        # file (or anything non-directory): directory-only bits on a file
+        # parent_fd make landlock_add_rule fail with EINVAL.
+        st = os.fstat(parent_fd)
+        if not stat.S_ISDIR(st.st_mode):
+            allowed_access &= file_mask
+            if allowed_access == 0:
+                return
         path_attr = _LandlockPathBeneathAttr()
         path_attr.allowed_access = allowed_access
         path_attr.parent_fd = parent_fd

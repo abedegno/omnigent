@@ -34,9 +34,15 @@ import pytest
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.landlock_sandbox import (
     _LANDLOCK_ACCESS_FS_IOCTL_DEV,
+    _LANDLOCK_ACCESS_FS_MAKE_DIR,
+    _LANDLOCK_ACCESS_FS_READ_DIR,
+    _LANDLOCK_ACCESS_FS_READ_FILE,
     _LANDLOCK_ACCESS_FS_REFER,
     _LANDLOCK_ACCESS_FS_TRUNCATE,
+    _LANDLOCK_ACCESS_FS_WRITE_FILE,
     LandlockSandboxBackend,
+    _add_path_rule,
+    _fs_file_mask_for_abi,
     _fs_write_mask_for_abi,
     detect_landlock_abi,
 )
@@ -191,6 +197,58 @@ def test_write_mask_clamps_refer_truncate_ioctl_per_abi() -> None:
     assert abi3 & abi5 == abi3
 
 
+def test_file_mask_excludes_directory_only_bits() -> None:
+    """
+    The file-applicable mask carries READ_FILE / WRITE_FILE (and
+    ABI-gated TRUNCATE / IOCTL_DEV) but NONE of the directory-only rights
+    (READ_DIR, MAKE_DIR, REFER, …). Handing a directory-only bit to
+    ``landlock_add_rule`` on a regular-file parent_fd is the EINVAL that
+    broke ``write_files`` — this guards the mask split that fixes it.
+    """
+    for abi in (1, 2, 3, 5):
+        mask = _fs_file_mask_for_abi(abi)
+        assert mask & _LANDLOCK_ACCESS_FS_READ_FILE
+        assert mask & _LANDLOCK_ACCESS_FS_WRITE_FILE
+        assert not (mask & _LANDLOCK_ACCESS_FS_READ_DIR), abi
+        assert not (mask & _LANDLOCK_ACCESS_FS_MAKE_DIR), abi
+        assert not (mask & _LANDLOCK_ACCESS_FS_REFER), abi
+    assert not (_fs_file_mask_for_abi(2) & _LANDLOCK_ACCESS_FS_TRUNCATE)
+    assert _fs_file_mask_for_abi(3) & _LANDLOCK_ACCESS_FS_TRUNCATE
+    assert not (_fs_file_mask_for_abi(3) & _LANDLOCK_ACCESS_FS_IOCTL_DEV)
+    assert _fs_file_mask_for_abi(5) & _LANDLOCK_ACCESS_FS_IOCTL_DEV
+
+
+# ---------------------------------------------------------------------------
+# _add_path_rule: skip missing paths, fail loud on everything else
+# ---------------------------------------------------------------------------
+
+
+def test_add_path_rule_skips_missing_path() -> None:
+    """
+    A non-existent granted path (``ENOENT``) is skipped, not fatal — the
+    spec may name a path that hasn't been created yet. No syscall is
+    issued (the open fails first), so a stub libc is fine.
+    """
+    with patch("omnigent.inner.landlock_sandbox.os.open", side_effect=FileNotFoundError()):
+        # Must not raise.
+        _add_path_rule(object(), 445, 3, Path("/does/not/exist"), 0b110, 0b110)  # type: ignore[arg-type]
+
+
+def test_add_path_rule_raises_on_non_skippable_oserror() -> None:
+    """
+    BLOCKING-2 contract: an existing-but-unopenable path
+    (``PermissionError`` / EACCES, ELOOP, EMFILE, …) must RAISE rather
+    than silently drop the requested allow rule. Swallowing it would
+    leave the helper under a weaker-than-requested policy.
+    """
+    with patch(
+        "omnigent.inner.landlock_sandbox.os.open",
+        side_effect=PermissionError(13, "Permission denied"),
+    ):
+        with pytest.raises(PermissionError):
+            _add_path_rule(object(), 445, 3, Path("/some/blocked/path"), 0b110, 0b110)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # Graceful degrade-open
 # ---------------------------------------------------------------------------
@@ -323,6 +381,67 @@ def test_write_outside_write_root_is_denied(tmp_path: Path) -> None:
     assert not (outside_dir / "pwned.txt").exists(), (
         "host filesystem mutated outside the write root — Landlock did not enforce"
     )
+
+
+@requires_landlock
+def test_write_files_grants_existing_regular_file(tmp_path: Path) -> None:
+    """
+    Regression for the EINVAL-on-regular-file bug: a ``write_files``
+    grant on an EXISTING regular file must let the helper write and
+    truncate THAT file, while a sibling file in the same directory stays
+    read-only.
+
+    Before the fix ``write_files`` entries were handed the full directory
+    mask (MAKE_DIR / REFER / …), so ``landlock_add_rule`` returned EINVAL
+    on the regular file and activation aborted entirely — this test would
+    have surfaced that as a child error. ``write_paths`` is intentionally
+    left empty so the ONLY writable thing is the granted file.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    target = work / "config.json"
+    target.write_text("original-content")
+    sibling = work / "sibling.txt"
+    sibling.write_text("do-not-touch")
+
+    body = f"""
+        backend = LandlockSandboxBackend()
+        spec = OSEnvSpec(
+            type="caller_process",
+            sandbox=OSEnvSandboxSpec(type="linux_landlock", write_files=[{str(target)!r}]),
+        )
+        policy = backend.resolve(spec, Path({str(work)!r}))
+        backend.activate(policy)
+        # Truncating open ('w') exercises the TRUNCATE right too.
+        try:
+            with open({str(target)!r}, "w") as fh:
+                fh.write("rewritten")
+            result["target"] = "wrote"
+        except OSError as exc:
+            result["target"] = f"FAILED:{{type(exc).__name__}}"
+        try:
+            with open({str(sibling)!r}, "w") as fh:
+                fh.write("pwned")
+            result["sibling"] = "WROTE"
+        except PermissionError:
+            result["sibling"] = "blocked"
+        except OSError as exc:
+            result["sibling"] = f"other:{{type(exc).__name__}}"
+    """
+    result = _run_probe(body)
+
+    assert "error" not in result, (
+        f"activation failed for a write_files regular file — the EINVAL "
+        f"regression is back: {result.get('error')}"
+    )
+    assert result["target"] == "wrote", (
+        f"write to the granted file should succeed, got {result['target']!r}"
+    )
+    assert result["sibling"] == "blocked", (
+        f"write to a sibling file (not granted) should be denied, got {result['sibling']!r}"
+    )
+    assert target.read_text() == "rewritten"
+    assert sibling.read_text() == "do-not-touch"
 
 
 @requires_landlock
