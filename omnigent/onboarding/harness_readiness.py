@@ -24,8 +24,10 @@ that would actually work.
 
 from __future__ import annotations
 
+import os
+
 from omnigent.harness_aliases import HARNESS_ALIASES, canonicalize_harness
-from omnigent.onboarding.harness_install import PI_KEY, harness_cli_installed
+from omnigent.onboarding.harness_install import CURSOR_KEY, PI_KEY, harness_cli_installed
 from omnigent.onboarding.provider_config import (
     _EXECUTOR_TYPE_HARNESS_ALIASES,
     _HARNESS_FAMILY,
@@ -88,6 +90,19 @@ def harness_is_configured(harness: str) -> bool:
     canonical = _canonical_harness(harness)
     if canonical in _SDK_HARNESSES:
         return True
+    if canonical == CURSOR_KEY:
+        # Cursor runs in-process via the ``cursor-sdk`` package (a baseline
+        # dependency, always importable) and authenticates against Cursor's own
+        # backend with a ``CURSOR_API_KEY`` — the SDK requires one, and a
+        # ``cursor-agent login`` does not apply. So, unlike the CLI-wrapping
+        # harnesses, there is no binary to gate on: readiness is whether a key
+        # is resolvable — one stored by ``omnigent setup`` (the ``cursor:``
+        # config block — see :mod:`omnigent.onboarding.cursor_auth`) or
+        # inherited from the environment. That is the one cursor credential the
+        # daemon can check cheaply and locally; a bad key surfaces at run time.
+        from omnigent.onboarding.cursor_auth import cursor_api_key_configured
+
+        return cursor_api_key_configured() or bool(os.environ.get("CURSOR_API_KEY"))
     if canonical not in _HARNESS_FAMILY and canonical != PI_SURFACE:
         # Unknown harness — the daemon has no install metadata for it, so
         # it can't assess readiness. Fail open (custom/newer harnesses,
@@ -113,4 +128,5 @@ def configured_harness_map() -> dict[str, bool]:
     spellings.update(_EXECUTOR_TYPE_HARNESS_ALIASES)
     spellings.update(HARNESS_ALIASES)
     spellings.add(PI_SURFACE)
+    spellings.add(CURSOR_KEY)
     return {spelling: harness_is_configured(spelling) for spelling in spellings}
