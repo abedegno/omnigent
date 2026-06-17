@@ -836,9 +836,7 @@ def test_run_parent_death_killer_exits_after_drain_without_hard_exit() -> None:
         exit_fn=lambda code: events.append("exit"),
     )
 
-    assert events == ["shutdown"], (
-        f"a completed drain must not hard-exit, observed {events}"
-    )
+    assert events == ["shutdown"], f"a completed drain must not hard-exit, observed {events}"
 
 
 def test_run_parent_death_killer_hard_exits_when_drain_times_out() -> None:
