@@ -8,6 +8,7 @@ Omnigent tools to Codex as App Server ``dynamicTools``.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import json
 import logging
@@ -294,6 +295,95 @@ def _kill_process_tree(process: _Process | None) -> None:
             return
     with suppress(ProcessLookupError, Exception):
         process.kill()
+
+
+# ---------------------------------------------------------------------------
+# Codex app-server crash backstop (O1)
+# ---------------------------------------------------------------------------
+#
+# Both codex app-server spawn sites (this module's _AppServerSession.start and
+# omnigent/codex_native_app_server.py CodexNativeAppServer.start) launch the
+# child with start_new_session=True, so each child is its own process-group
+# leader (pgid == child pid) and its serve-mcp / policy-hook grandchildren live
+# in that group. The happy-path close()s already killpg that group. This
+# registry is the crash backstop: a host crash, SIGKILL of this interpreter, or
+# a SIGTERM/SIGINT would otherwise orphan the whole codex tree (these children
+# are in their OWN session, so they are NOT reaped by the runner's harness-group
+# kill). Modelled on seatbelt_sandbox._cleanup_profile_files (atexit.register
+# at module import).
+_APPSERVER_PGIDS: set[int] = set()
+
+
+def _register_appserver_pgid(pgid: int) -> None:
+    """Record a live app-server process-group id for crash-time reaping."""
+    _APPSERVER_PGIDS.add(pgid)
+
+
+def _deregister_appserver_pgid(pgid: int) -> None:
+    """Drop a pgid after a clean close so the reaper never double-kills it.
+
+    Critical: after a clean close the OS may reuse the pid (hence pgid), so
+    signalling a deregistered group could hit an unrelated process.
+    """
+    _APPSERVER_PGIDS.discard(pgid)
+
+
+def _reap_registered_appserver_pgids() -> None:
+    """SIGKILL every still-registered app-server group; best-effort, drains.
+
+    Runs at interpreter exit (atexit) and on a fatal signal. Drains the set so
+    a subsequent reap (e.g. atexit after a signal handler already ran) is a
+    no-op. Each kill is isolated: a group that already exited
+    (ProcessLookupError) or one we cannot signal (PermissionError) is skipped.
+    """
+    while _APPSERVER_PGIDS:
+        pgid = _APPSERVER_PGIDS.pop()
+        if os.name != "posix":
+            continue
+        with suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+
+
+def _install_appserver_reaper() -> None:
+    """Install the atexit + SIGTERM/SIGINT app-server reaper, once.
+
+    The signal handlers CHAIN to any previously-installed handler so this never
+    clobbers the harness runner's own signal-driven graceful shutdown — it
+    reaps the app-server groups first, then re-raises into the prior handler.
+    Idempotent so repeated imports in the same interpreter do not stack handlers.
+    """
+    global _APPSERVER_REAPER_INSTALLED
+    if _APPSERVER_REAPER_INSTALLED:
+        return
+    _APPSERVER_REAPER_INSTALLED = True
+    atexit.register(_reap_registered_appserver_pgids)
+    if os.name != "posix":
+        return
+
+    def _make_handler(signum: int):
+        previous = signal.getsignal(signum)
+
+        def _handler(sig, frame):  # noqa: ANN001 - stdlib signal handler shape
+            _reap_registered_appserver_pgids()
+            if callable(previous):
+                previous(sig, frame)
+            elif previous == signal.SIG_DFL:
+                # Restore default and re-raise so the process still dies as it
+                # would have (e.g. SIGTERM -> terminate) after we reaped.
+                signal.signal(sig, signal.SIG_DFL)
+                os.kill(os.getpid(), sig)
+
+        return _handler
+
+    for _signum in (signal.SIGTERM, signal.SIGINT):
+        with suppress(ValueError, OSError):
+            # ValueError: not on the main thread (e.g. a worker import) -> the
+            # atexit hook still covers the common interpreter-exit case.
+            signal.signal(_signum, _make_handler(_signum))
+
+
+_APPSERVER_REAPER_INSTALLED = False
+_install_appserver_reaper()
 
 
 def _find_codex_cli() -> str | None:
@@ -1184,6 +1274,9 @@ class _CodexAppServerSession:
                 start_new_session=(os.name == "posix"),
                 cwd=self._cwd or os.getcwd(),
             )
+            if os.name == "posix" and self._proc.pid is not None:
+                # Own session leader: pgid == pid. Crash backstop (O1).
+                _register_appserver_pgid(self._proc.pid)
             self._reader_task = asyncio.create_task(self._reader_loop())
             self._stderr_task = asyncio.create_task(self._stderr_loop())
             await self._request(
@@ -1204,6 +1297,11 @@ class _CodexAppServerSession:
             raise
 
     async def close(self) -> None:
+        _pgid = (
+            self._proc.pid
+            if (self._proc is not None and os.name == "posix" and self._proc.pid is not None)
+            else None
+        )
         current_loop = asyncio.get_running_loop()
         if self._loop is not None and self._loop is not current_loop:
             if self._proc is not None and self._proc.returncode is None:
@@ -1219,6 +1317,8 @@ class _CodexAppServerSession:
             self.thread_id = None
             self.active_turn_id = None
             self._cleanup_process_cwd()
+            if _pgid is not None:
+                _deregister_appserver_pgid(_pgid)
             return
 
         if self._proc is not None and self._proc.returncode is None:
@@ -1256,6 +1356,8 @@ class _CodexAppServerSession:
         self.active_turn_id = None
         self._recent_events.clear()
         self._cleanup_process_cwd()
+        if _pgid is not None:
+            _deregister_appserver_pgid(_pgid)
 
     def _cleanup_process_cwd(self) -> None:
         if self._codex_home_dir is not None:

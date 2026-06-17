@@ -2599,3 +2599,56 @@ def test_model_provider_override_with_gateway_raises() -> None:
             model="some-model",
             model_provider_override="Databricks",
         )
+
+
+# ---------------------------------------------------------------------------
+# O1: codex app-server crash-safe pgid reaper
+# ---------------------------------------------------------------------------
+
+
+def test_appserver_pgid_registry_reaps_then_drains(monkeypatch):
+    """A registered app-server pgid is SIGKILL'd by the reaper and the
+    set is drained, so a clean deregister can't double-kill (O1)."""
+    import omnigent.inner.codex_executor as ce
+
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(ce.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    ce._register_appserver_pgid(4242)
+    ce._reap_registered_appserver_pgids()
+
+    assert killed == [(4242, ce.signal.SIGKILL)]
+    # Reaper drained the set: a second reap is a no-op (no double-kill).
+    killed.clear()
+    ce._reap_registered_appserver_pgids()
+    assert killed == []
+
+
+def test_appserver_pgid_deregister_prevents_reap(monkeypatch):
+    """A cleanly-closed app-server deregisters its pgid, so the atexit
+    reaper never signals an already-reaped (and possibly PID-reused)
+    group (O1)."""
+    import omnigent.inner.codex_executor as ce
+
+    killed: list[int] = []
+    monkeypatch.setattr(ce.os, "killpg", lambda pgid, sig: killed.append(pgid))
+
+    ce._register_appserver_pgid(5151)
+    ce._deregister_appserver_pgid(5151)
+    ce._reap_registered_appserver_pgids()
+
+    assert killed == []
+
+
+def test_reap_appserver_pgids_tolerates_dead_group(monkeypatch):
+    """A group that already exited (ProcessLookupError) is skipped and the
+    set still drains — reaping is strictly best-effort (O1)."""
+    import omnigent.inner.codex_executor as ce
+
+    def _boom(pgid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(ce.os, "killpg", _boom)
+    ce._register_appserver_pgid(6262)
+    ce._reap_registered_appserver_pgids()  # must not raise
+    ce._reap_registered_appserver_pgids()  # drained; still no raise

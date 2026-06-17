@@ -30,9 +30,11 @@ from omnigent.inner.codex_executor import (
     _databricks_codex_auth_command,
     _databricks_codex_base_url,
     _databricks_codex_config_overrides,
+    _deregister_appserver_pgid,
     _find_codex_cli,
     _populate_codex_home_config,
     _provider_codex_config_overrides,
+    _register_appserver_pgid,
 )
 from omnigent.inner.databricks_executor import _read_databrickscfg, _read_databrickscfg_host
 
@@ -576,6 +578,8 @@ class CodexNativeAppServer:
             cwd=str(self.cwd),
             start_new_session=(os.name == "posix"),
         )
+        if os.name == "posix" and self.proc.pid is not None:
+            _register_appserver_pgid(self.proc.pid)  # crash backstop (O1)
         self.recent_stderr = []
         self.stderr_task = asyncio.create_task(
             self._stderr_loop(),
@@ -705,6 +709,11 @@ class CodexNativeAppServer:
 
         :returns: None.
         """
+        _pgid = (
+            self.proc.pid
+            if (self.proc is not None and os.name == "posix" and self.proc.pid is not None)
+            else None
+        )
         if self.proc is not None and self.proc.returncode is None:
             _terminate_process_tree(self.proc)
             try:
@@ -716,6 +725,8 @@ class CodexNativeAppServer:
             self.stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.stderr_task
+        if _pgid is not None:
+            _deregister_appserver_pgid(_pgid)
         self.proc = None
         self.stderr_task = None
 
