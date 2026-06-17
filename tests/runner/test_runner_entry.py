@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import os
@@ -1410,7 +1411,7 @@ async def test_dead_peer_sweep_monitor_invokes_pass_then_can_be_cancelled() -> N
     )
     await asyncio.wait_for(seen.wait(), timeout=1.0)
     task.cancel()
-    with __import__("contextlib").suppress(asyncio.CancelledError):
+    with contextlib.suppress(asyncio.CancelledError):
         await task
     assert passes >= 1
 
