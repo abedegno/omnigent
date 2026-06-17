@@ -5247,11 +5247,16 @@ def create_runner_app(
                 if not _has_repl_terminal:
                     _publish_terminal_pending(_publish_event, session_id, True)
                     try:
+                        repl_agent_spec = await _resolve_session_agent_spec(session_id)
+                    except OmnigentError:
+                        repl_agent_spec = None
+                    try:
                         await _auto_create_repl_terminal(
                             session_id,
                             resource_registry,
                             _publish_event,
                             server_client=server_client,
+                            agent_spec=repl_agent_spec,
                         )
                     except Exception:
                         # Unlike the native branches, the REPL terminal is a
@@ -10313,11 +10318,16 @@ def create_runner_app(
                 # the entry unconditionally and tears the instance down.
                 await registry.close(session_id, _REPL_TERMINAL_NAME, _REPL_TERMINAL_SESSION_KEY)
                 try:
+                    repl_agent_spec = await _resolve_session_agent_spec(session_id)
+                except OmnigentError:
+                    repl_agent_spec = None
+                try:
                     await _auto_create_repl_terminal(
                         session_id,
                         resource_registry,
                         _publish_event,
                         server_client=server_client,
+                        agent_spec=repl_agent_spec,
                     )
                 except Exception:
                     # Broad catch, same rationale as the session-create
