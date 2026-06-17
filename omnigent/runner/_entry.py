@@ -963,11 +963,13 @@ async def _run_tunnel_from_env() -> None:
         if idle_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await idle_task
-        await app.router.shutdown()
-        # Signal the parent-death killer that graceful drain (pm.shutdown /
-        # terminal_registry.shutdown via _stop_pm) has completed, so it skips
-        # the os._exit backstop (B2).
-        drained_event.set()
+        try:
+            await app.router.shutdown()
+        finally:
+            # Signal the parent-death killer that graceful drain (pm.shutdown /
+            # terminal_registry.shutdown via _stop_pm) has completed, so it skips
+            # the os._exit backstop (B2).
+            drained_event.set()
 
 
 def _install_signal_handlers(

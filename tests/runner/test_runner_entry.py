@@ -7,6 +7,7 @@ import io
 import logging
 import os
 import tarfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -797,8 +798,6 @@ def test_run_parent_death_killer_stands_down_when_adopted() -> None:
 
     :returns: None.
     """
-    import threading
-
     events: list[str] = []
     adopted = threading.Event()
     adopted.set()
@@ -821,8 +820,6 @@ def test_run_parent_death_killer_stands_down_when_adopted() -> None:
 def test_run_parent_death_killer_exits_after_drain_without_hard_exit() -> None:
     """When graceful drain signals completion within the timeout, the killer
     returns WITHOUT hard-exiting -- pm/registry shutdown ran to completion (B2)."""
-    import threading
-
     events: list[str] = []
     drained = threading.Event()
 
@@ -847,8 +844,6 @@ def test_run_parent_death_killer_exits_after_drain_without_hard_exit() -> None:
 def test_run_parent_death_killer_hard_exits_when_drain_times_out() -> None:
     """If the drain never completes within the bounded timeout, the killer
     still hard-exits as the final backstop (B2)."""
-    import threading
-
     events: list[str] = []
     drained = threading.Event()  # never set => drain "wedged"
 
