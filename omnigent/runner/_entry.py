@@ -454,8 +454,9 @@ def _run_parent_death_killer(
     request_shutdown: Callable[[], None],
     *,
     adopted: threading.Event | None = None,
+    drained: threading.Event | None = None,
     poll_interval_s: float = 0.5,
-    grace_s: float = 2.0,
+    drain_timeout_s: float = 20.0,
     exit_fn: Callable[[int], None] = os._exit,
 ) -> None:
     """Force the runner to exit once its parent (host daemon) dies.
@@ -466,9 +467,13 @@ def _run_parent_death_killer(
     shutdown wedges the event loop — so an event-loop watchdog would never
     fire and the WS tunnel would stay open, leaving the server seeing the
     runner online forever. On detecting the parent's death this requests a
-    graceful shutdown, then after *grace_s* hard-exits as a backstop. When
-    graceful shutdown wins the race the process is already gone and this
-    daemon thread dies with it, so the hard exit is a no-op in practice.
+    graceful shutdown, then waits up to *drain_timeout_s* for the loop to
+    signal *drained* (set after ``app.router.shutdown()`` ->
+    ``pm.shutdown()`` / ``registry.shutdown()`` completes). If the drain
+    completes it returns WITHOUT hard-exiting, so terminals/subprocesses are
+    reaped cleanly. ``os._exit`` via *exit_fn* remains only as the final
+    backstop for a wedged drain — its worst case equals the old flat-grace
+    behaviour.
 
     When *adopted* is set the watch ends without tearing the runner down:
     the launcher (CLI) intentionally exited — e.g. the user detached from
@@ -483,10 +488,13 @@ def _run_parent_death_killer(
     :param adopted: Event set when the runner has been adopted; once set,
         the watcher returns without requesting shutdown. ``None`` disables
         adoption (watch until parent death).
+    :param drained: Event the loop sets once graceful shutdown has fully
+        completed. ``None`` keeps the old behaviour (wait the full timeout,
+        then hard-exit) for callers/tests that do not wire a drain signal.
     :param poll_interval_s: Seconds between parent-liveness probes, e.g.
         ``0.5``.
-    :param grace_s: Seconds to allow graceful shutdown before the hard
-        exit, e.g. ``2.0``.
+    :param drain_timeout_s: Bounded seconds to allow graceful drain before
+        the hard exit, e.g. ``20.0``.
     :param exit_fn: Hard-exit function, defaults to :func:`os._exit`;
         injectable so tests can observe it without killing the runner.
     :returns: None.
@@ -500,8 +508,13 @@ def _run_parent_death_killer(
     if adopted is not None and adopted.is_set():
         return
     request_shutdown()
-    time.sleep(grace_s)
-    # os._exit skips buffer flushing, so flush logs first for diagnosability.
+    if drained is not None:
+        if drained.wait(drain_timeout_s):
+            # Graceful shutdown completed; the process is exiting cleanly.
+            return
+    else:
+        time.sleep(drain_timeout_s)
+    # Drain wedged (or no drain signal wired): force the process down.
     with contextlib.suppress(Exception):
         sys.stderr.flush()
     exit_fn(0)
@@ -916,16 +929,17 @@ async def _run_tunnel_from_env() -> None:
             ),
             name=f"runner-idle-monitor:{runner_id}",
         )
+    drained_event = threading.Event()
     if parent_pid is not None:
         # Orphan guard runs on a dedicated daemon thread, not the event
         # loop: if the loop wedges during shutdown (harness mid-boot when
         # the host dies), an event-loop watchdog could never fire. The
-        # thread requests graceful shutdown via the loop, then hard-exits
-        # as a backstop. See _run_parent_death_killer.
+        # thread requests graceful shutdown via the loop, then waits for
+        # drained_event before the hard-exit backstop. See _run_parent_death_killer.
         threading.Thread(
             target=_run_parent_death_killer,
             args=(parent_pid, lambda: loop.call_soon_threadsafe(stop_event.set)),
-            kwargs={"adopted": adopted_event},
+            kwargs={"adopted": adopted_event, "drained": drained_event},
             name=f"runner-parent-killer:{parent_pid}",
             daemon=True,
         ).start()
@@ -950,6 +964,10 @@ async def _run_tunnel_from_env() -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await idle_task
         await app.router.shutdown()
+        # Signal the parent-death killer that graceful drain (pm.shutdown /
+        # terminal_registry.shutdown via _stop_pm) has completed, so it skips
+        # the os._exit backstop (B2).
+        drained_event.set()
 
 
 def _install_signal_handlers(

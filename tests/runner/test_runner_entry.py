@@ -778,7 +778,7 @@ def test_run_parent_death_killer_requests_shutdown_then_hard_exits() -> None:
         os.getppid() + 100000,  # already "orphaned"
         lambda: events.append("shutdown"),
         poll_interval_s=0.01,
-        grace_s=0.01,
+        drain_timeout_s=0.01,
         exit_fn=lambda code: (events.append("exit"), exit_calls.append(code)),
     )
 
@@ -808,7 +808,7 @@ def test_run_parent_death_killer_stands_down_when_adopted() -> None:
         lambda: events.append("shutdown"),
         adopted=adopted,
         poll_interval_s=0.01,
-        grace_s=0.01,
+        drain_timeout_s=0.01,
         exit_fn=lambda code: events.append("exit"),
     )
 
@@ -816,6 +816,52 @@ def test_run_parent_death_killer_stands_down_when_adopted() -> None:
         f"an adopted runner must not tear down, but observed {events}; the "
         "web UI would lose a still-live agent on a clean detach"
     )
+
+
+def test_run_parent_death_killer_exits_after_drain_without_hard_exit() -> None:
+    """When graceful drain signals completion within the timeout, the killer
+    returns WITHOUT hard-exiting -- pm/registry shutdown ran to completion (B2)."""
+    import threading
+
+    events: list[str] = []
+    drained = threading.Event()
+
+    def _request_shutdown() -> None:
+        events.append("shutdown")
+        drained.set()  # simulate the loop completing app.router.shutdown()
+
+    _run_parent_death_killer(
+        os.getppid() + 100000,  # already orphaned
+        _request_shutdown,
+        drained=drained,
+        poll_interval_s=0.01,
+        drain_timeout_s=5.0,
+        exit_fn=lambda code: events.append("exit"),
+    )
+
+    assert events == ["shutdown"], (
+        f"a completed drain must not hard-exit, observed {events}"
+    )
+
+
+def test_run_parent_death_killer_hard_exits_when_drain_times_out() -> None:
+    """If the drain never completes within the bounded timeout, the killer
+    still hard-exits as the final backstop (B2)."""
+    import threading
+
+    events: list[str] = []
+    drained = threading.Event()  # never set => drain "wedged"
+
+    _run_parent_death_killer(
+        os.getppid() + 100000,
+        lambda: events.append("shutdown"),
+        drained=drained,
+        poll_interval_s=0.01,
+        drain_timeout_s=0.05,
+        exit_fn=lambda code: (events.append("exit"), None)[1],
+    )
+
+    assert events == ["shutdown", "exit"]
 
 
 @pytest.mark.asyncio
