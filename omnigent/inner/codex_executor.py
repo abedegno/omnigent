@@ -363,7 +363,7 @@ def _install_appserver_reaper() -> None:
     def _make_handler(signum: int):
         previous = signal.getsignal(signum)
 
-        def _handler(sig, frame):  # noqa: ANN001 - stdlib signal handler shape
+        def _handler(sig, frame):
             _reap_registered_appserver_pgids()
             if callable(previous):
                 previous(sig, frame)
