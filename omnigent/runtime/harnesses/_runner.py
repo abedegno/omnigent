@@ -39,6 +39,7 @@ package shape and §Process management.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import os
 import signal
@@ -49,6 +50,8 @@ from types import FrameType
 
 import uvicorn
 from fastapi import FastAPI
+
+from omnigent.inner.codex_executor import _reap_registered_appserver_pgids
 
 # uvicorn log level for harness subprocesses. ``"warning"`` keeps
 # the per-process noise low (AP and the harness wrap both emit
@@ -186,6 +189,8 @@ def _arm_hard_exit(reason: str, sig: int = signal.SIGTERM) -> None:
             file=sys.stderr,
             flush=True,
         )
+        with contextlib.suppress(Exception):
+            _reap_registered_appserver_pgids()
         os._exit(128 + int(sig))
 
     threading.Thread(target=_hard_exit, name="harness-hard-exit", daemon=True).start()

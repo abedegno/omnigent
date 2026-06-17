@@ -832,6 +832,68 @@ async def test_spawned_harness_is_session_leader(
         await manager.shutdown()
 
 
+async def test_shutdown_releases_entries_concurrently(
+    manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shutdown() releases all entries concurrently, not serially.
+
+    With N entries each whose close takes ~grace_s, a serial loop
+    would take N*grace_s.  Concurrent gather completes in ~1*grace_s.
+    We inject a slow fake _close_entry and assert the wall-clock
+    elapsed is closer to 1x than N-serial.
+    """
+    from omnigent.runtime.harnesses import process_manager as pm_mod
+
+    GRACE_S = 0.15
+    N = 3
+
+    released: list[str] = []
+
+    async def slow_close(entry: pm_mod._SubprocessEntry) -> None:
+        await asyncio.sleep(GRACE_S)
+        released.append(entry.harness)  # harness field stores conv_id in fake entries
+
+    monkeypatch.setattr(manager, "_close_entry", slow_close)
+
+    # Inject N fake entries directly into the registry so we don't need
+    # real subprocesses.  We abuse the harness field to carry the conv_id.
+    import unittest.mock as mock
+
+    await manager.start()
+    try:
+        for i in range(N):
+            cid = f"conv_fake_{i}"
+            fake_process = mock.MagicMock()
+            fake_process.returncode = 0
+            fake_process.pid = i + 1
+            fake_client = mock.MagicMock()
+            fake_client.aclose = mock.AsyncMock()
+            entry = pm_mod._SubprocessEntry(
+                process=fake_process,
+                client=fake_client,
+                socket_path=manager.instance_dir / f"conv-fake-{i}.sock",
+                harness=cid,  # overloaded to track which entry closed
+            )
+            manager._entries[cid] = entry
+
+        t0 = asyncio.get_event_loop().time()
+        await manager.shutdown()
+        elapsed = asyncio.get_event_loop().time() - t0
+
+        # All entries released
+        assert set(released) == {f"conv_fake_{i}" for i in range(N)}
+        # Elapsed should be ~1*GRACE_S (concurrent), not N*GRACE_S (serial).
+        # Allow generous headroom (2x) to avoid CI flakiness.
+        assert elapsed < GRACE_S * 2, (
+            f"shutdown took {elapsed:.3f}s — expected ~{GRACE_S:.2f}s (concurrent); "
+            f"serial would take ~{N * GRACE_S:.2f}s"
+        )
+    finally:
+        # shutdown already called above; reset state so fixture teardown is safe
+        manager._started = False
+
+
 async def test_close_entry_group_kills_as_backstop(
     manager: HarnessProcessManager,
     monkeypatch: pytest.MonkeyPatch,

@@ -732,9 +732,10 @@ class HarnessProcessManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reaper_task
             self._reaper_task = None
-        # Snapshot then iterate — release mutates ``_entries``.
-        for conv_id in list(self._entries):
-            await self.release(conv_id)
+        # Snapshot then release all concurrently — release() takes
+        # _registry_lock per call and is self-contained, so concurrent
+        # gather is safe and avoids N×grace-period serial stalls.
+        await asyncio.gather(*[self.release(cid) for cid in list(self._entries)])
         # Best-effort cleanup of our instance dir. If a subprocess
         # we couldn't kill is still holding a socket file, the
         # rmtree leaves it behind; the next Omnigent boot's orphan

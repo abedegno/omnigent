@@ -336,8 +336,11 @@ def _reap_registered_appserver_pgids() -> None:
     no-op. Each kill is isolated: a group that already exited
     (ProcessLookupError) or one we cannot signal (PermissionError) is skipped.
     """
-    while _APPSERVER_PGIDS:
-        pgid = _APPSERVER_PGIDS.pop()
+    while True:
+        try:
+            pgid = _APPSERVER_PGIDS.pop()
+        except KeyError:
+            break
         if os.name != "posix":
             continue
         with suppress(ProcessLookupError, PermissionError, OSError):
@@ -347,10 +350,25 @@ def _reap_registered_appserver_pgids() -> None:
 def _install_appserver_reaper() -> None:
     """Install the atexit + SIGTERM/SIGINT app-server reaper, once.
 
-    The signal handlers CHAIN to any previously-installed handler so this never
-    clobbers the harness runner's own signal-driven graceful shutdown — it
-    reaps the app-server groups first, then re-raises into the prior handler.
-    Idempotent so repeated imports in the same interpreter do not stack handlers.
+    Live reap paths (in order of reliability):
+    (a) atexit hook — fires on normal interpreter exit; the primary path
+        for the happy-path ``CodexExecutor.close()`` callers.
+    (b) harness hard-exit hook — ``_runner._arm_hard_exit`` calls
+        ``_reap_registered_appserver_pgids()`` immediately before
+        ``os._exit()`` so the codex groups are killed even when the
+        runner is force-exiting after a wedged graceful shutdown.
+
+    The SIGTERM/SIGINT signal handlers installed below are a best-effort
+    fallback for processes that do NOT replace them (e.g. plain scripts,
+    unit tests).  In production the asyncio event loop (runner process)
+    and uvicorn (harness process) both install their OWN SIGTERM/SIGINT
+    handlers at startup — replacing this module's handler — so these
+    handlers are typically NOT the live reap path in those processes.
+    They are still installed so that reap works in any interpreter that
+    does not run an event loop.  They CHAIN to whatever was previously
+    installed so they never clobber the loop's own graceful-shutdown
+    handler.  Idempotent so repeated imports in the same interpreter do
+    not stack handlers.
     """
     global _APPSERVER_REAPER_INSTALLED
     if _APPSERVER_REAPER_INSTALLED:
