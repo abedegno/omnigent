@@ -466,16 +466,16 @@ class CredentialProxySpec:
 class OSEnvSandboxSpec:
     """Sandbox configuration for an OS environment."""
 
-    # Backend identifier, e.g. ``"linux_bwrap"``,
+    # Backend identifier, e.g. ``"linux_landlock"``,
     # ``"darwin_seatbelt"``, or ``"none"``. The dataclass default of
-    # ``"linux_bwrap"`` is a safe sentinel for in-process construction
+    # ``"linux_landlock"`` is a safe sentinel for in-process construction
     # (``OSEnvSandboxSpec(type=self.type_name)`` is the idiomatic call
     # site); YAML parsers map a missing ``type:`` field to the platform
     # default at parse time via
     # :func:`omnigent.inner.sandbox._default_sandbox_for_platform`,
-    # which picks ``linux_bwrap`` on Linux (with ``bwrap`` on PATH)
-    # and ``darwin_seatbelt`` on macOS.
-    type: str = "linux_bwrap"
+    # which picks ``linux_landlock`` on Linux (Landlock LSM, no bwrap
+    # binary required) and ``darwin_seatbelt`` on macOS.
+    type: str = "linux_landlock"
     # Read-only filesystem grants. Each entry is a path string the
     # backend resolves (``~`` is expanded; ``$VAR`` is intentionally
     # NOT expanded — see ``_resolve_root`` for the rationale).
