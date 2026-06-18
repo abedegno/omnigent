@@ -10,8 +10,12 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from omnigent.inner.sandbox import (
     SandboxPolicy,
+    _default_sandbox_for_platform,
+    _ensure_builtin_backends,
     create_exec_launcher,
     run_launcher,
 )
@@ -371,3 +375,39 @@ def test_exec_launcher_without_allowlist_keeps_inherited_env(tmp_path) -> None:
     child_env = json.loads(out_file.read_text())
     # Opt-in contract: no allowlist, no prune.
     assert child_env.get("DELIBERATE_EXTRA") == "kept"
+
+
+# ---------------------------------------------------------------------------
+# NAS-deploy: Linux default sandbox is linux_landlock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="Linux-default sandbox test only runs on Linux",
+)
+def test_linux_default_sandbox_is_landlock() -> None:
+    """_default_sandbox_for_platform() must return linux_landlock on Linux.
+
+    The hardened NAS container cannot run bwrap; linux_landlock is the
+    default so agents that omit sandbox.type get Landlock, not bwrap.
+    """
+    spec = _default_sandbox_for_platform()
+    assert spec.type == "linux_landlock", (
+        f"Expected linux_landlock as Linux default, got {spec.type!r}. "
+        "Check _default_sandbox_for_platform() in omnigent/inner/sandbox.py."
+    )
+
+
+def test_linux_landlock_backend_is_registered() -> None:
+    """linux_landlock backend must be importable and registered after
+    _ensure_builtin_backends() is called -- on any platform (the import
+    guard lives inside the backend module itself, not in registration).
+    """
+    from omnigent.inner.sandbox import _BACKENDS
+
+    _ensure_builtin_backends()
+    assert "linux_landlock" in _BACKENDS, (
+        f"linux_landlock not in _BACKENDS after _ensure_builtin_backends(). "
+        f"Registered backends: {sorted(_BACKENDS)}"
+    )
