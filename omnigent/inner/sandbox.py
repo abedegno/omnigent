@@ -809,8 +809,9 @@ def _default_sandbox_for_platform() -> OSEnvSandboxSpec:
     """
     Pick the platform-preferred sandbox backend for the host OS.
 
-    - **Linux**: ``linux_bwrap`` (mount/PID/UTS/IPC namespaces +
-      seccomp via the ``bwrap`` binary).
+    - **Linux**: ``linux_landlock`` (Landlock LSM filesystem
+      restrictions; no ``bwrap`` binary required, works in hardened
+      containers that deny ``CLONE_NEWUSER``).
     - **macOS**: ``darwin_seatbelt`` (SBPL via ``sandbox-exec``).
     - **Windows**: ``windows_jobobject`` (Job Object process-tree
       containment + resource limits; no filesystem/network isolation).
@@ -824,15 +825,13 @@ def _default_sandbox_for_platform() -> OSEnvSandboxSpec:
     (CI nodes, dev laptops, and the runtime host can all differ).
 
     Fail-loud is preserved, but at the layer that actually matters:
-    when the chosen backend is resolved at **run** time and its binary
-    is missing, the backend raises (see
-    :meth:`omnigent.inner.bwrap_sandbox.BwrapSandboxBackend.resolve`,
-    which errors with an install hint when ``bwrap`` is not on
-    ``PATH``). So an agent that omitted ``sandbox.type`` on a host with
-    no usable mechanism still fails loudly rather than silently running
-    unsandboxed — it just fails when the sandbox is built, not when the
-    spec is parsed. The only explicit opt-out remains
-    ``os_env.sandbox.type='none'``.
+    when the chosen backend is resolved at **run** time and Landlock is
+    unavailable, the backend logs a warning and degrades gracefully
+    rather than crashing (see
+    :meth:`omnigent.inner.landlock_sandbox.LandlockSandboxBackend.activate`).
+    So an agent that omitted ``sandbox.type`` on a kernel without
+    Landlock runs without filesystem enforcement — explicit
+    ``sandbox.type='none'`` remains the deliberate opt-out.
 
     Spec-self-containment is preserved: a YAML that explicitly
     declares ``sandbox.type: linux_bwrap`` still routes to the bwrap
@@ -847,7 +846,7 @@ def _default_sandbox_for_platform() -> OSEnvSandboxSpec:
         ``os_env.sandbox.type='none'`` explicitly to run without one.
     """
     if sys.platform.startswith("linux"):
-        return OSEnvSandboxSpec(type="linux_bwrap")
+        return OSEnvSandboxSpec(type="linux_landlock")
     if sys.platform == "darwin":
         return OSEnvSandboxSpec(type="darwin_seatbelt")
     if os.name == "nt":
