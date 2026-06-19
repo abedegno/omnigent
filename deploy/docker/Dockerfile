@@ -204,6 +204,22 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git tmux procps lsof bubblewrap curl ca-certificates unzip \
       iproute2 nftables \
+      poppler-utils file jq qpdf unzip libimage-exiftool-perl sqlite3 \
+      tesseract-ocr tesseract-ocr-eng \
+ && rm -rf /var/lib/apt/lists/*
+
+# OSINT document toolchain for the NO2 investigator runner (capability track / BL-2):
+# poppler-utils -> pdftotext/pdfinfo/pdfimages; file; jq; qpdf; unzip;
+# libimage-exiftool-perl -> exiftool; sqlite3; tesseract-ocr(+eng) -> OCR.
+# gh via the official apt repo so coding sub-agents' `gh pr create` resolves from the
+# image's default PATH (retires the /root/bin/gh workaround). Separate RUN: needs its repo.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
 # OpenShell-required non-root user (see the header note). UID/GID in the high
