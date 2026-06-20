@@ -321,6 +321,12 @@ RUN set -eu; \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /build /build
 
+# OSINT evidence-capture stealth track (capability track): Playwright, so the NO2
+# investigator's capture-stealth.py can drive the external CloakBrowser via
+# connect_over_cdp. connect_over_cdp ATTACHES to an already-running browser, so only
+# the Python package + its driver are needed — no `playwright install` browser download.
+RUN /opt/venv/bin/pip install --no-cache-dir playwright
+
 # Sandbox launchers exec commands through `bash -lc`, and Debian's
 # /etc/profile unconditionally resets PATH for login shells — the ENV
 # PATH above would silently drop off and `omnigent` / `pip` would
