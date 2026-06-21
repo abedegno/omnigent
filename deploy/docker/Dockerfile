@@ -206,11 +206,13 @@ RUN apt-get update \
       iproute2 nftables \
       poppler-utils file jq qpdf unzip libimage-exiftool-perl sqlite3 \
       tesseract-ocr tesseract-ocr-eng \
+      ripgrep dnsutils whois \
  && rm -rf /var/lib/apt/lists/*
 
 # OSINT document toolchain for the NO2 investigator runner (capability track / BL-2):
 # poppler-utils -> pdftotext/pdfinfo/pdfimages; file; jq; qpdf; unzip;
 # libimage-exiftool-perl -> exiftool; sqlite3; tesseract-ocr(+eng) -> OCR.
+# ripgrep -> rg (BL-12 #4); dnsutils -> dig/host/nslookup + whois (infra leads, BL-2 follow-up).
 # gh via the official apt repo so coding sub-agents' `gh pr create` resolves from the
 # image's default PATH (retires the /root/bin/gh workaround). Separate RUN: needs its repo.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
