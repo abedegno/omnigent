@@ -387,6 +387,22 @@ def _clean_codex_env(extra_allow: Iterable[str] = ()) -> dict[str, str]:
     return env
 
 
+def _declared_passthrough(os_env: OSEnvSpec | None) -> tuple[str, ...]:
+    """Env-var names an agent declared for tool passthrough.
+
+    Lives on ``os_env.sandbox.env_passthrough`` (an
+    :class:`OSEnvSandboxSpec` field), not on ``OSEnvSpec`` directly.
+    Returns an empty tuple when any link in that chain is absent.
+    """
+    if (
+        os_env is not None
+        and os_env.sandbox is not None
+        and os_env.sandbox.env_passthrough
+    ):
+        return tuple(os_env.sandbox.env_passthrough)
+    return ()
+
+
 def codex_skill_sources(bundle_dir: Path | None, home: Path) -> list[Path]:
     """
     Build the ordered Codex skill-source list: bundle skills, then host skills.
@@ -2108,9 +2124,7 @@ class CodexExecutor(Executor):
         if not resolved_codex:
             raise ImportError("CodexExecutor requires the 'codex' CLI on PATH.")
         self._codex_path = resolved_codex
-        self._env = _clean_codex_env(
-            self._os_env_spec.env_passthrough or () if self._os_env_spec else ()
-        )
+        self._env = _clean_codex_env(_declared_passthrough(self._os_env_spec))
         # Retry policy → OpenAI SDK env vars (Codex uses the OpenAI
         # SDK internally). Speculative — empirical audit pending.
         self._retry_policy = retry_policy if retry_policy is not None else RetryPolicy()
