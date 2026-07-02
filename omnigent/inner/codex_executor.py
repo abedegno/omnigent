@@ -376,8 +376,16 @@ def _clean_codex_env(extra_allow: Iterable[str] = ()) -> dict[str, str]:
         "LC_",
     )
     allow_exact = {
-        "HOME", "PATH", "TERM", "TMPDIR", "TMP", "TEMP", "PYTHONUTF8",
-        "DATABRICKS_BEARER", "DATABRICKS_CODEX_TOKEN", OMNIGENT_SESSION_ENV_VAR,
+        "HOME",
+        "PATH",
+        "TERM",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "PYTHONUTF8",
+        "DATABRICKS_BEARER",  # explicit CI/integration bearer used by auth.command
+        "DATABRICKS_CODEX_TOKEN",  # env_key referenced by ~/.codex/config.toml's DB provider
+        OMNIGENT_SESSION_ENV_VAR,  # "inside Omnigent" marker (CLAUDE_CODE/CODEX analog)
     } | set(extra_allow)
     for key, value in os.environ.items():
         if key in _CODEX_ENV_DENY_EXACT:
@@ -394,11 +402,7 @@ def _declared_passthrough(os_env: OSEnvSpec | None) -> tuple[str, ...]:
     :class:`OSEnvSandboxSpec` field), not on ``OSEnvSpec`` directly.
     Returns an empty tuple when any link in that chain is absent.
     """
-    if (
-        os_env is not None
-        and os_env.sandbox is not None
-        and os_env.sandbox.env_passthrough
-    ):
+    if os_env is not None and os_env.sandbox is not None and os_env.sandbox.env_passthrough:
         return tuple(os_env.sandbox.env_passthrough)
     return ()
 
