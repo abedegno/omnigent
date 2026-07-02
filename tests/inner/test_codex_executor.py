@@ -2785,6 +2785,7 @@ def test_codex_skill_sources_omits_absent_dirs(tmp_path: Path) -> None:
 
 def test_clean_codex_env_honors_extra_allow(monkeypatch):
     from omnigent.inner.codex_executor import _clean_codex_env
+
     monkeypatch.setenv("CRAWL4AI_API_TOKEN", "secret-tok")
     monkeypatch.setenv("COMPANIES_HOUSE_API_KEY", "ch-key")
     # undeclared → stripped by the hardcoded allowlist
@@ -2797,6 +2798,7 @@ def test_clean_codex_env_honors_extra_allow(monkeypatch):
 
 def test_clean_codex_env_deny_wins_over_extra_allow(monkeypatch):
     from omnigent.inner.codex_executor import _clean_codex_env
+
     monkeypatch.setenv("OPENAI_API_KEY", "sk-stripped")
     # the deny rule (subscription auth) wins even if a caller declares it
     assert "OPENAI_API_KEY" not in _clean_codex_env(["OPENAI_API_KEY"])
