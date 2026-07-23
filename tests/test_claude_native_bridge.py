@@ -6021,9 +6021,7 @@ def test_prepare_bridge_dir_writes_owner_pid_marker(
     prune the dir only when its owner is provably dead."""
     from omnigent.claude_native_bridge import prepare_bridge_dir
 
-    monkeypatch.setattr(
-        "omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "claude-native"
-    )
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "claude-native")
     monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
 
     bridge_dir = prepare_bridge_dir("conv_owner", workspace=tmp_path)
