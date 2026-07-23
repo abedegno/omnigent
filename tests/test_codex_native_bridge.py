@@ -339,9 +339,7 @@ def test_prepare_bridge_dir_writes_owner_pid_marker(
 
     from omnigent.codex_native_bridge import prepare_bridge_dir
 
-    monkeypatch.setattr(
-        "omnigent.codex_native_bridge._BRIDGE_ROOT", tmp_path / "codex-native"
-    )
+    monkeypatch.setattr("omnigent.codex_native_bridge._BRIDGE_ROOT", tmp_path / "codex-native")
 
     bridge_dir = prepare_bridge_dir("bridge_owner")
 
