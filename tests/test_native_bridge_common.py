@@ -155,3 +155,33 @@ def test_reap_isolates_a_failing_pruner(monkeypatch: pytest.MonkeyPatch) -> None
 
     # codex raises but is swallowed; claude still runs and its count is returned.
     assert native_bridge_common.reap_orphaned_native_bridge_dirs() == 7
+
+
+def test_reap_isolates_a_module_that_raises_on_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge module raising a non-ImportError at import time is skipped,
+    never propagated — a broken transitive import must not crash startup."""
+    agents = (SimpleNamespace(key="broken"), SimpleNamespace(key="claude"))
+    monkeypatch.setattr("omnigent.harness_plugins.native_agents", lambda: agents)
+
+    real_import = native_bridge_common.importlib.import_module
+
+    def _fake_import(name: str, *args: object, **kwargs: object):
+        if name == "omnigent.broken_native_bridge":
+            raise RuntimeError("boom at import time")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(native_bridge_common.importlib, "import_module", _fake_import)
+
+    called: list[str] = []
+
+    def _claude_prune() -> int:
+        called.append("claude")
+        return 3
+
+    monkeypatch.setattr("omnigent.claude_native_bridge.prune_orphaned_bridge_dirs", _claude_prune)
+
+    # The broken module's import RuntimeError is swallowed; claude still runs.
+    assert native_bridge_common.reap_orphaned_native_bridge_dirs() == 3
+    assert called == ["claude"]
