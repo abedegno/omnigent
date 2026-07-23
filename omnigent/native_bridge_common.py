@@ -58,11 +58,12 @@ def prune_orphaned_dirs(bridge_root: Path) -> int:
     The in-run analog of the terminal/process orphan sweeps: scans
     *bridge_root* and rmtrees each immediate child dir whose ``owner.pid``
     marker names a process that no longer exists. Conservative in the
-    dangerous direction — a reused/foreign pid reads as alive and is left,
-    with a re-check immediately before removal to narrow the pid-reuse race
-    between the liveness read and the rmtree. Dirs with no marker (or an
-    unparseable one) are left untouched: they are either from an older
-    version or not ours.
+    dangerous direction — a reused/foreign pid reads as alive and is left.
+    The check-then-rmtree race (a pid reused between the liveness read and
+    the removal) is accepted: it is benign because a live session refreshes
+    its marker every turn, so only genuinely orphaned dirs reach removal.
+    Dirs with no marker (or an unparseable one) are left untouched: they are
+    either from an older version or not ours.
 
     Reuses the canonical liveness predicate from
     ``inner/terminal.py:_process_alive``.
@@ -84,12 +85,11 @@ def prune_orphaned_dirs(bridge_root: Path) -> int:
             continue
         if _owner_pid_alive(pid):
             continue
-        # Re-check immediately before removal: if the pid was reused by a
-        # live process in the window since the read above, it now reads as
-        # alive and the dir is spared (conservative). See
-        # inner/terminal.py:_process_alive for the liveness rule.
-        if _owner_pid_alive(pid):
-            continue
+        # Accepted residual race: the owner pid could in principle be reused
+        # by a new live process between this check and the rmtree below. The
+        # window is tiny and benign here — a live session refreshes its
+        # owner.pid every turn, so its dir always reads as live at check time
+        # and only a genuinely orphaned dir reaches this point.
         shutil.rmtree(entry, ignore_errors=True)
         pruned += 1
     return pruned
@@ -122,7 +122,13 @@ def reap_orphaned_native_bridge_dirs() -> int:
         module_name = f"omnigent.{agent.key}_native_bridge"
         try:
             module = importlib.import_module(module_name)
-        except ImportError:
+        except Exception:
+            # A broken transitive import must not crash runner startup;
+            # skip this harness (matches the per-prune guard below).
+            _logger.exception(
+                "Error importing native bridge module %s for orphan sweep",
+                module_name,
+            )
             continue
         prune = getattr(module, "prune_orphaned_bridge_dirs", None)
         if prune is None:
