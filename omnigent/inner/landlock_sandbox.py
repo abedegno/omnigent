@@ -102,8 +102,10 @@ Known deltas from ``linux_bwrap`` (documented intentionally)
   escaping-symlink masker is not applied here; with unrestricted reads
   every readable path stays readable.
 - **No network / namespace isolation.** ``allow_network`` is carried on
-  the policy for interface parity but is not enforced (Landlock ABI 4+
-  can restrict TCP bind/connect, but that is out of scope here). There
+  the policy for interface parity. Network confinement IS enforced when
+  ``egress_relay_port`` is set: ABI 4+ TCP rights are handled with no
+  rules added, denying all TCP while leaving AF_UNIX -- and therefore the
+  bind-mounted egress socket -- usable. There
   is likewise no PID/UTS/IPC namespace isolation and no seccomp
   denylist — those are bwrap-only.
 """
@@ -153,7 +155,9 @@ _PR_SET_NO_NEW_PRIVS = 38
 _LANDLOCK_CREATE_RULESET_VERSION = 1 << 0
 
 # ``enum landlock_rule_type`` — only PATH_BENEATH exists for filesystem
-# rules (NET_PORT was added in ABI 4 and is not used here).
+# rules. NET_PORT (ABI 4) is deliberately never *added* as a rule: this
+# backend handles the network rights and adds no port rule, which is
+# exactly what denies all TCP. A NET_PORT rule would ALLOW a port.
 _LANDLOCK_RULE_PATH_BENEATH = 1
 
 # ``LANDLOCK_ACCESS_FS_*`` bits from ``include/uapi/linux/landlock.h``.
@@ -175,6 +179,20 @@ _LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
 _LANDLOCK_ACCESS_FS_REFER = 1 << 13  # ABI >= 2
 _LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14  # ABI >= 3
 _LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15  # ABI >= 5
+
+# Network access rights (ABI >= 4). Only TCP is expressible: Landlock has
+# no rule type for UDP, raw sockets or AF_UNIX. That asymmetry is what
+# makes sole-egress work -- handling both TCP rights while adding no
+# NET_PORT rule denies every TCP connect and bind, while the bind-mounted
+# Unix socket to the parent's egress proxy is untouched because AF_UNIX is
+# outside Landlock's network scope entirely.
+_LANDLOCK_ACCESS_NET_BIND_TCP = 1 << 0     # ABI >= 4
+_LANDLOCK_ACCESS_NET_CONNECT_TCP = 1 << 1  # ABI >= 4
+
+_NET_SOLE_EGRESS = _LANDLOCK_ACCESS_NET_BIND_TCP | _LANDLOCK_ACCESS_NET_CONNECT_TCP
+
+#: Minimum Landlock ABI that can express network restrictions.
+_MIN_ABI_FOR_NET = 4
 
 # Read-class rights: opening files for read, listing/traversing dirs,
 # and executing. Granted to read roots and (implicitly, via the full
@@ -310,6 +328,21 @@ def detect_landlock_abi() -> int | None:
             return None
         raise OSError(err, f"landlock_create_ruleset(version probe) failed: {os.strerror(err)}")
     return rc
+
+
+def _net_mask_for_abi(abi: int) -> int:
+    """
+    Return the network rights to handle for sole-egress on *abi*.
+
+    Returns 0 below ABI 4, where the rights do not exist. Callers that
+    REQUIRE network confinement must treat 0 as a hard failure rather than
+    proceeding -- see :meth:`_LandlockBackend.activate`. Handing back 0 and
+    letting the caller decide keeps the ABI clamping in one place, matching
+    the filesystem masks.
+    """
+    if abi < _MIN_ABI_FOR_NET:
+        return 0
+    return _NET_SOLE_EGRESS
 
 
 def _fs_read_mask_for_abi(abi: int) -> int:
@@ -502,8 +535,22 @@ class LandlockSandboxBackend(SandboxBackend):
             rule add, restrict-self, or no-new-privs). The absent /
             disabled case does NOT raise — it degrades open.
         """
+        # Sole-egress: the caller is relying on Landlock to make the L7
+        # proxy the ONLY route out. Degrading open here would silently give
+        # the session unrestricted network while it believes it is confined
+        # -- so every failure path below is fail-closed when this is set.
+        sole_egress = policy.egress_relay_port is not None
+
         abi = detect_landlock_abi()
         if abi is None:
+            if sole_egress:
+                raise ValueError(
+                    "os_env.sandbox.type=linux_landlock cannot enforce egress "
+                    "confinement: the Landlock LSM is unavailable on this "
+                    f"kernel (arch={platform.machine()}). Refusing rather than "
+                    "degrading open, because the caller requires the egress "
+                    "proxy to be the only network path."
+                )
             # Degrade open: Landlock is not available on this kernel /
             # arch. Hard-failing here would make every spawn on a
             # non-Landlock host fail; the operator opted into this
@@ -518,12 +565,34 @@ class LandlockSandboxBackend(SandboxBackend):
             )
             return
 
+        if sole_egress and abi < _MIN_ABI_FOR_NET:
+            raise ValueError(
+                "os_env.sandbox.type=linux_landlock cannot enforce egress "
+                f"confinement: kernel reports Landlock ABI {abi}, and network "
+                f"restrictions require ABI {_MIN_ABI_FOR_NET} or later. "
+                "Refusing rather than enforcing only the filesystem half, "
+                "which would leave the session networked while it believes "
+                "it is confined."
+            )
+
         numbers = _landlock_syscall_numbers()
-        # detect_landlock_abi already returned non-None, so the arch is
-        # known; this is belt-and-suspenders for the type checker.
-        if numbers is None:  # pragma: no cover - unreachable given abi check
+        if numbers is None:
+            # Unsupported architecture. This is the third fail-open path in
+            # this method and it needs the same treatment as the other two:
+            # returning here under sole-egress would leave the session with
+            # an open network while the caller believes otherwise.
+            if sole_egress:
+                raise ValueError(
+                    "os_env.sandbox.type=linux_landlock cannot enforce egress "
+                    f"confinement: unsupported architecture "
+                    f"{platform.machine()!r}. Refusing rather than degrading "
+                    "open, because the caller requires the egress proxy to be "
+                    "the only network path."
+                )
             return
         _create_ruleset, add_rule, restrict_self = numbers
+
+        net_handled = _net_mask_for_abi(abi)
 
         read_mask = _fs_read_mask_for_abi(abi)
         write_mask = _fs_write_mask_for_abi(abi)
@@ -540,6 +609,10 @@ class LandlockSandboxBackend(SandboxBackend):
 
         ruleset_attr = _LandlockRulesetAttr()
         ruleset_attr.handled_access_fs = handled
+        # Handled but with NO net rules added: every TCP bind and connect is
+        # denied. AF_UNIX is unaffected, so the bind-mounted egress socket
+        # remains the single usable path out.
+        ruleset_attr.handled_access_net = net_handled
         ctypes.set_errno(0)
         ruleset_fd = int(
             libc.syscall(
