@@ -34,19 +34,19 @@ import pytest
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.landlock_sandbox import (
     _LANDLOCK_ACCESS_FS_IOCTL_DEV,
-    _LANDLOCK_ACCESS_NET_BIND_TCP,
-    _LANDLOCK_ACCESS_NET_CONNECT_TCP,
-    _net_mask_for_abi,
     _LANDLOCK_ACCESS_FS_MAKE_DIR,
     _LANDLOCK_ACCESS_FS_READ_DIR,
     _LANDLOCK_ACCESS_FS_READ_FILE,
     _LANDLOCK_ACCESS_FS_REFER,
     _LANDLOCK_ACCESS_FS_TRUNCATE,
     _LANDLOCK_ACCESS_FS_WRITE_FILE,
+    _LANDLOCK_ACCESS_NET_BIND_TCP,
+    _LANDLOCK_ACCESS_NET_CONNECT_TCP,
     LandlockSandboxBackend,
     _add_path_rule,
     _fs_file_mask_for_abi,
     _fs_write_mask_for_abi,
+    _net_mask_for_abi,
     detect_landlock_abi,
 )
 from omnigent.inner.sandbox import (
@@ -583,9 +583,7 @@ def test_egress_refuses_when_landlock_is_unavailable(tmp_path: Path) -> None:
     network while the caller believes the proxy is the only route out.
     """
     backend = LandlockSandboxBackend()
-    with patch(
-        "omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=None
-    ):
+    with patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=None):
         with pytest.raises(ValueError, match="only network path"):
             backend.activate(_egress_policy(egress=True, tmp=tmp_path))
 
@@ -611,9 +609,7 @@ def test_without_egress_unavailable_landlock_still_degrades_open(
     without Landlock. That behaviour is deliberate and documented.
     """
     backend = LandlockSandboxBackend()
-    with patch(
-        "omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=None
-    ):
+    with patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=None):
         backend.activate(_egress_policy(egress=False, tmp=tmp_path))  # must not raise
 
 
@@ -688,7 +684,7 @@ def test_activate_handles_tcp_rights_and_adds_no_net_rule(tmp_path: Path) -> Non
         backend_type="linux_landlock",
         active=True,
         read_roots=None,
-        write_roots=[],          # no path rules, so add_rule is only ever net
+        write_roots=[],  # no path rules, so add_rule is only ever net
         write_files=[],
         allow_network=True,
         egress_relay_port=1080,

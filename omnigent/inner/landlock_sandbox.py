@@ -186,7 +186,7 @@ _LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15  # ABI >= 5
 # NET_PORT rule denies every TCP connect and bind, while the bind-mounted
 # Unix socket to the parent's egress proxy is untouched because AF_UNIX is
 # outside Landlock's network scope entirely.
-_LANDLOCK_ACCESS_NET_BIND_TCP = 1 << 0     # ABI >= 4
+_LANDLOCK_ACCESS_NET_BIND_TCP = 1 << 0  # ABI >= 4
 _LANDLOCK_ACCESS_NET_CONNECT_TCP = 1 << 1  # ABI >= 4
 
 _NET_SOLE_EGRESS = _LANDLOCK_ACCESS_NET_BIND_TCP | _LANDLOCK_ACCESS_NET_CONNECT_TCP

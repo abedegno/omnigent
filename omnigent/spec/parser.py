@@ -21,7 +21,6 @@ from pydantic import (
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.inner.datamodel import (
-    backend_hard_enforces_sole_egress,
     DEFAULT_BASIC_USERNAME,
     CredentialProxyEntry,
     CredentialProxySpec,
@@ -31,6 +30,7 @@ from omnigent.inner.datamodel import (
     OSEnvSandboxSpec,
     OSEnvSpec,
     TerminalEnvSpec,
+    backend_hard_enforces_sole_egress,
 )
 from omnigent.inner.sandbox import containment_prefix
 from omnigent.spec.types import (

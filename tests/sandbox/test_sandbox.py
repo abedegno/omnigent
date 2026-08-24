@@ -95,11 +95,11 @@ def test_bwrap_import_triggers_backend_registration() -> None:
     assert isinstance(backend, bwrap.BwrapSandboxBackend)
 
 
-def test_default_sandbox_for_platform_is_bwrap_on_linux_regardless_of_binary() -> None:
+def test_default_sandbox_for_platform_is_landlock_on_linux_regardless_of_binary() -> None:
     """
-    The Linux platform default is ``linux_bwrap`` and the choice does
-    **not** depend on whether the ``bwrap`` binary is installed on the
-    host doing the resolving.
+    The Linux platform default is ``linux_landlock`` (fork: bdfce757) and
+    the choice does **not** depend on whether any sandbox binary is
+    installed on the host doing the resolving.
 
     This is the property that keeps spec parsing host-independent: the
     default is materialized at parse time (loader / spec parser), so a
@@ -122,9 +122,15 @@ def test_default_sandbox_for_platform_is_bwrap_on_linux_regardless_of_binary() -
     ):
         spec = inner_sandbox._default_sandbox_for_platform()
     assert isinstance(spec, OSEnvSandboxSpec)
-    assert spec.type == "linux_bwrap", (
-        "Linux default sandbox should be 'linux_bwrap' independent of "
-        f"bwrap availability; got {spec.type!r}."
+    # FORK: the Linux default here is linux_landlock (bdfce757) -- the
+    # hardened container cannot create the user namespace bwrap needs. The
+    # property under test is unchanged and is the reason this test exists:
+    # the choice must not depend on which binaries the resolving host has,
+    # which is why shutil.which is patched to None above. Do NOT forward
+    # this expectation upstream, where the default is still linux_bwrap.
+    assert spec.type == "linux_landlock", (
+        "Linux default sandbox should be the fork's 'linux_landlock' and "
+        f"independent of binary availability; got {spec.type!r}."
     )
 
 
