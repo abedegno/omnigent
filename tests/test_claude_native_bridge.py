@@ -6647,6 +6647,8 @@ def test_claude_pane_ready_is_true_only_at_an_idle_input_box(
 
 def test_claude_pane_ready_is_false_without_an_advertised_pane(tmp_path: Path) -> None:
     assert claude_native_bridge.claude_pane_ready(tmp_path / "nope") is False
+
+
 # ── owner-pid marker + orphan prune (bridge-dir reaping) ────────────────────
 
 
