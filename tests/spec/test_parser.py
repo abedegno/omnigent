@@ -4343,10 +4343,14 @@ def test_parse_credential_proxy_requires_egress_rules(tmp_path: Path) -> None:
         parse(tmp_path)
 
 
+# NOTE: this test used linux_landlock as its soft-backend example until
+# landlock gained ABI 4+ TCP deny. It now uses `none`, which genuinely
+# cannot enforce. The test's purpose -- isolating the credential_proxy
+# backend guard from the egress_rules guard -- is unchanged.
 def test_parse_credential_proxy_requires_hard_backend(tmp_path: Path) -> None:
     """``credential_proxy`` requires a network-isolating backend.
 
-    On ``linux_landlock`` (no hard network deny) the egress proxy isn't
+    On ``none`` (no network enforcement at all) the egress proxy isn't
     the only path out, so binding credentials there is unsafe — rejected.
 
     We deliberately OMIT ``egress_rules`` here so the egress-rules backend
@@ -4364,7 +4368,7 @@ def test_parse_credential_proxy_requires_hard_backend(tmp_path: Path) -> None:
             "type": "caller_process",
             "cwd": ".",
             "sandbox": {
-                "type": "linux_landlock",
+                "type": "none",
                 "credential_proxy": [
                     {"type": "git_https", "target": "github.com", "source": {"env": "X"}}
                 ],
