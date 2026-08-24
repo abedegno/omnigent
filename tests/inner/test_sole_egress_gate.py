@@ -16,8 +16,11 @@ import omnigent.inner.loader as loader
 import omnigent.spec.parser as parser
 import omnigent.spec.validator as validator
 from omnigent.inner.datamodel import (
-    SOLE_EGRESS_BACKENDS,
-    backend_hard_enforces_sole_egress,
+    COMPLETE_EGRESS_BACKENDS,
+    EGRESS_CAPABLE_BACKENDS,
+    TCP_ONLY_EGRESS_BACKENDS,
+    backend_can_enforce_egress_rules,
+    backend_egress_is_tcp_only,
 )
 
 GATE_MODULES = (loader, parser, validator)
@@ -25,19 +28,41 @@ GATE_MODULES = (loader, parser, validator)
 
 @pytest.mark.parametrize("backend", ["linux_bwrap", "darwin_seatbelt", "linux_landlock"])
 def test_sole_egress_backends_accepted(backend: str) -> None:
-    assert backend_hard_enforces_sole_egress(backend)
+    assert backend_can_enforce_egress_rules(backend)
 
 
 @pytest.mark.parametrize("backend", ["none", "windows_jobobject", "auto", None, ""])
 def test_backends_that_cannot_enforce_are_refused(backend: str | None) -> None:
     """Default-deny: anything not proven to hard-enforce is refused."""
-    assert not backend_hard_enforces_sole_egress(backend)
+    assert not backend_can_enforce_egress_rules(backend)
 
 
-def test_landlock_is_in_the_set() -> None:
-    """The change this test exists for. Without landlock the deployment
-    that cannot run bwrap has no way to declare egress rules at all."""
-    assert "linux_landlock" in SOLE_EGRESS_BACKENDS
+def test_landlock_can_enforce_but_is_tcp_only() -> None:
+    """The distinction a whole-branch review found missing.
+
+    Landlock restricts TCP bind/connect and nothing else -- no UDP, no raw
+    sockets, no other families, and not a socket connected before
+    restriction. Calling that "the proxy is the only egress path", as an
+    earlier version of this predicate did, accepted specs whose declared
+    allow-list could be bypassed over a non-TCP transport.
+    """
+    assert backend_can_enforce_egress_rules("linux_landlock")
+    assert backend_egress_is_tcp_only("linux_landlock")
+
+
+def test_complete_backends_are_not_tcp_only() -> None:
+    """bwrap and seatbelt remove the network stack; their guarantee is
+    strictly stronger and must not be conflated with Landlock's."""
+    for backend in COMPLETE_EGRESS_BACKENDS:
+        assert backend_can_enforce_egress_rules(backend)
+        assert not backend_egress_is_tcp_only(backend), backend
+
+
+def test_the_two_sets_are_disjoint_and_cover_the_capable_set() -> None:
+    """No backend may be both, and none may go unclassified -- that is how
+    a weaker guarantee gets described as a stronger one."""
+    assert not (COMPLETE_EGRESS_BACKENDS & TCP_ONLY_EGRESS_BACKENDS)
+    assert COMPLETE_EGRESS_BACKENDS | TCP_ONLY_EGRESS_BACKENDS == EGRESS_CAPABLE_BACKENDS
 
 
 @pytest.mark.parametrize("module", GATE_MODULES, ids=lambda m: m.__name__)
@@ -48,7 +73,7 @@ def test_every_gate_site_uses_the_shared_predicate(module: object) -> None:
     list gets widened in some places and not others.
     """
     src = inspect.getsource(module)
-    assert "backend_hard_enforces_sole_egress" in src, (
+    assert "backend_can_enforce_egress_rules" in src, (
         f"{module.__name__} does not use the shared predicate"
     )
     assert 'not in ("linux_bwrap"' not in src, f"{module.__name__} still hardcodes a backend list"

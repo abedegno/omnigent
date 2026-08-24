@@ -102,10 +102,12 @@ Known deltas from ``linux_bwrap`` (documented intentionally)
   escaping-symlink masker is not applied here; with unrestricted reads
   every readable path stays readable.
 - **No network / namespace isolation.** ``allow_network`` is carried on
-  the policy for interface parity. Network confinement IS enforced when
+  the policy for interface parity. TCP confinement IS enforced when
   ``egress_relay_port`` is set: ABI 4+ TCP rights are handled with no
-  rules added, denying all TCP while leaving AF_UNIX -- and therefore the
-  bind-mounted egress socket -- usable. There
+  rules added, denying all new TCP binds/connects while leaving AF_UNIX --
+  and therefore the bind-mounted egress socket -- usable. This enforces the
+  HTTP(S) allow-list but is **not** a complete network boundary: UDP, raw
+  sockets and other families are outside Landlock's scope. There
   is likewise no PID/UTS/IPC namespace isolation and no seccomp
   denylist — those are bwrap-only.
 """
@@ -181,11 +183,18 @@ _LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14  # ABI >= 3
 _LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15  # ABI >= 5
 
 # Network access rights (ABI >= 4). Only TCP is expressible: Landlock has
-# no rule type for UDP, raw sockets or AF_UNIX. That asymmetry is what
-# makes sole-egress work -- handling both TCP rights while adding no
-# NET_PORT rule denies every TCP connect and bind, while the bind-mounted
-# Unix socket to the parent's egress proxy is untouched because AF_UNIX is
-# outside Landlock's network scope entirely.
+# no rule type for UDP, raw/ICMP sockets, SCTP, AF_VSOCK or AF_UNIX.
+#
+# Handling both TCP rights while adding no NET_PORT rule denies every new
+# IPv4/IPv6 TCP bind and connect, while the bind-mounted Unix socket to the
+# parent's egress proxy is untouched because AF_UNIX is outside Landlock's
+# network scope. That is what lets the HTTP(S) allow-list be enforced.
+#
+# It is NOT a complete network boundary, and must never be described as
+# one. Unrestricted here: UDP, raw sockets, other protocol families, and
+# any socket already connected before landlock_restrict_self. bwrap's
+# --unshare-net removes the network stack entirely and is strictly
+# stronger. See datamodel.TCP_ONLY_EGRESS_BACKENDS.
 _LANDLOCK_ACCESS_NET_BIND_TCP = 1 << 0  # ABI >= 4
 _LANDLOCK_ACCESS_NET_CONNECT_TCP = 1 << 1  # ABI >= 4
 
@@ -609,10 +618,19 @@ class LandlockSandboxBackend(SandboxBackend):
 
         ruleset_attr = _LandlockRulesetAttr()
         ruleset_attr.handled_access_fs = handled
-        # Handled but with NO net rules added: every TCP bind and connect is
-        # denied. AF_UNIX is unaffected, so the bind-mounted egress socket
-        # remains the single usable path out.
+        # Handled but with NO net rules added: every new TCP bind and connect
+        # is denied. AF_UNIX is unaffected, so the bind-mounted egress socket
+        # remains usable -- and is the only usable path out FOR TCP. UDP, raw
+        # sockets and other families are not restricted by Landlock at all.
         ruleset_attr.handled_access_net = net_handled
+        if sole_egress:
+            _LOGGER.warning(
+                "[omnigent-sandbox] linux_landlock enforces the egress "
+                "allow-list for TCP only: UDP, raw/ICMP sockets, SCTP, "
+                "AF_VSOCK and sockets connected before restriction are NOT "
+                "confined. Use linux_bwrap or darwin_seatbelt where a "
+                "complete network boundary is required."
+            )
         ctypes.set_errno(0)
         ruleset_fd = int(
             libc.syscall(

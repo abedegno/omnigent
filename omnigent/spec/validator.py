@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from omnigent.inner.datamodel import backend_hard_enforces_sole_egress
+from omnigent.inner.datamodel import backend_can_enforce_egress_rules
 from omnigent.spec.types import AgentSpec, ToolRuntime
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9-]+$")
@@ -476,7 +476,7 @@ def _validate_compaction(spec: AgentSpec, result: ValidationResult) -> None:
 # allow-list in ``omnigent/inner/loader.py``. ``none`` is excluded
 # — it doesn't install a namespace or SBPL, so egress rules would be
 # inert decoration on the policy.
-# Superseded by datamodel.backend_hard_enforces_sole_egress -- the three
+# Superseded by datamodel.backend_can_enforce_egress_rules -- the three
 # gate sites had already begun to drift apart.
 
 
@@ -535,13 +535,13 @@ def _validate_os_env(spec: AgentSpec, result: ValidationResult) -> None:
             "sandbox.type=none does not create a scratch tmpdir",
         )
 
-    if egress_rules and not backend_hard_enforces_sole_egress(sandbox_type):
+    if egress_rules and not backend_can_enforce_egress_rules(sandbox_type):
         result.add(
             "os_env.sandbox.egress_rules",
-            "os_env.sandbox.egress_rules requires a sandbox backend that "
-            "hard-enforces sole egress - linux_bwrap or linux_landlock "
-            "(Linux), darwin_seatbelt (macOS) - for enforcement of the "
-            "network allow-list. "
+            "os_env.sandbox.egress_rules requires a sandbox backend that can "
+            "enforce the network allow-list: linux_bwrap (Linux) or "
+            "darwin_seatbelt (macOS) for every transport, or linux_landlock "
+            "(Linux) for TCP only. "
             f"Got sandbox.type={sandbox_type!r}; the rules would be "
             "inert decoration on the policy and the agent would have "
             "unrestricted network access despite the YAML declaring otherwise. "

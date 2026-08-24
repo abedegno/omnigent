@@ -18,7 +18,7 @@ from .datamodel import (
     OSEnvSpec,
     ParamDef,
     TerminalEnvSpec,
-    backend_hard_enforces_sole_egress,
+    backend_can_enforce_egress_rules,
 )
 from .policies import (
     FunctionPolicy,
@@ -772,13 +772,14 @@ def _parse_os_env_sandbox_spec(data: YamlData | str | bool | None) -> OSEnvSandb
     # object as inert decoration while ``curl`` reaches the open
     # internet, looking exactly like the bug class fixed in
     # ``terminal._clone_sandbox_spec``.
-    if egress_rules and not backend_hard_enforces_sole_egress(sandbox_type):
+    if egress_rules and not backend_can_enforce_egress_rules(sandbox_type):
         raise ValueError(
-            "os_env.sandbox.egress_rules requires a sandbox backend that "
-            "hard-enforces sole egress - linux_bwrap or linux_landlock "
-            "(Linux), darwin_seatbelt (macOS): those backends restrict "
-            "network access at spawn time so the MITM proxy is the only "
-            f"egress path. Got sandbox.type={sandbox_type!r}."
+            "os_env.sandbox.egress_rules requires a sandbox backend that can "
+            "enforce it: linux_bwrap (Linux) or darwin_seatbelt (macOS), "
+            "which remove the network stack so the MITM proxy is the only "
+            "path out for every transport; or linux_landlock (Linux), which "
+            "denies TCP only and leaves UDP and raw sockets unrestricted. "
+            f"Got sandbox.type={sandbox_type!r}."
         )
     allow_private = data.get("egress_allow_private_destinations", False)
     if not isinstance(allow_private, bool):
@@ -801,11 +802,12 @@ def _parse_os_env_sandbox_spec(data: YamlData | str | bool | None) -> OSEnvSandb
     )
 
     credential_proxy = _parse_credential_proxy(data.get("credential_proxy"))
-    if credential_proxy is not None and not backend_hard_enforces_sole_egress(sandbox_type):
+    if credential_proxy is not None and not backend_can_enforce_egress_rules(sandbox_type):
         raise ValueError(
-            "os_env.sandbox.credential_proxy requires sandbox.type=linux_bwrap "
-            "(Linux) or sandbox.type=darwin_seatbelt (macOS) so credentials are "
-            "bound to a hardened helper boundary. "
+            "os_env.sandbox.credential_proxy requires a sandbox backend that "
+            "can enforce egress: linux_bwrap (Linux) or darwin_seatbelt "
+            "(macOS), or linux_landlock (Linux, TCP only), so credentials "
+            "are bound to a hardened helper boundary. "
             f"Got sandbox.type={sandbox_type!r}."
         )
     if credential_proxy is not None and not egress_rules:

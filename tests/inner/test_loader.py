@@ -1014,7 +1014,7 @@ os_env:
             f.flush()
             try:
                 with self.assertRaisesRegex(
-                    ValueError, r"credential_proxy requires sandbox\.type"
+                    ValueError, r"credential_proxy requires a sandbox backend"
                 ):
                     load_agent_def(f.name)
             finally:

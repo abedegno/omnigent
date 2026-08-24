@@ -3825,7 +3825,7 @@ def test_parse_credential_proxy_requires_hard_backend(tmp_path: Path) -> None:
         },
     }
     (tmp_path / "config.yaml").write_text(yaml.dump(config))
-    with pytest.raises(OmnigentError, match=r"credential_proxy requires sandbox.type"):
+    with pytest.raises(OmnigentError, match=r"credential_proxy requires a sandbox backend"):
         parse(tmp_path)
 
 
