@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from omnigent.spec.types import AgentSpec, ToolRuntime
 from omnigent.inner.datamodel import backend_hard_enforces_sole_egress
+from omnigent.spec.types import AgentSpec, ToolRuntime
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9-]+$")
 # Agent names appear as components of the ``model`` field in API responses

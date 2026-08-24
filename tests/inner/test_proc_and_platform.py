@@ -287,7 +287,16 @@ def test_explicit_bwrap_errors_loudly_on_windows() -> None:
 def test_posix_default_sandbox_is_not_jobobject() -> None:
     from omnigent.inner import sandbox
 
-    assert sandbox._default_sandbox_for_platform().type in {"linux_bwrap", "darwin_seatbelt"}
+    # FORK: this deployment defaults Linux to linux_landlock (see
+    # bdfce757) because the hardened container cannot run bwrap. The
+    # test's purpose -- posix must never default to a Windows backend --
+    # is unchanged. Do NOT forward this line upstream, where the Linux
+    # default is still linux_bwrap.
+    assert sandbox._default_sandbox_for_platform().type in {
+        "linux_bwrap",
+        "linux_landlock",
+        "darwin_seatbelt",
+    }
 
 
 @pytest.mark.windows_only

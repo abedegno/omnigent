@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, mo
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.inner.datamodel import (
-    backend_hard_enforces_sole_egress,
     DEFAULT_BASIC_USERNAME,
     CredentialProxyEntry,
     CredentialProxySpec,
@@ -24,6 +23,7 @@ from omnigent.inner.datamodel import (
     OSEnvSandboxSpec,
     OSEnvSpec,
     TerminalEnvSpec,
+    backend_hard_enforces_sole_egress,
 )
 from omnigent.spec.types import (
     DEFAULT_ASK_TIMEOUT,

@@ -23,9 +23,7 @@ from omnigent.inner.datamodel import (
 GATE_MODULES = (loader, parser, validator)
 
 
-@pytest.mark.parametrize(
-    "backend", ["linux_bwrap", "darwin_seatbelt", "linux_landlock"]
-)
+@pytest.mark.parametrize("backend", ["linux_bwrap", "darwin_seatbelt", "linux_landlock"])
 def test_sole_egress_backends_accepted(backend: str) -> None:
     assert backend_hard_enforces_sole_egress(backend)
 
@@ -53,9 +51,7 @@ def test_every_gate_site_uses_the_shared_predicate(module: object) -> None:
     assert "backend_hard_enforces_sole_egress" in src, (
         f"{module.__name__} does not use the shared predicate"
     )
-    assert 'not in ("linux_bwrap"' not in src, (
-        f"{module.__name__} still hardcodes a backend list"
-    )
+    assert 'not in ("linux_bwrap"' not in src, f"{module.__name__} still hardcodes a backend list"
 
 
 def test_no_module_hardcodes_the_backend_tuple() -> None:
