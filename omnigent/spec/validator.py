@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from omnigent.spec.types import AgentSpec, ToolRuntime
+from omnigent.inner.datamodel import backend_hard_enforces_sole_egress
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9-]+$")
 # Agent names appear as components of the ``model`` field in API responses
@@ -475,7 +476,8 @@ def _validate_compaction(spec: AgentSpec, result: ValidationResult) -> None:
 # allow-list in ``omnigent/inner/loader.py``. ``none`` is excluded
 # — it doesn't install a namespace or SBPL, so egress rules would be
 # inert decoration on the policy.
-_EGRESS_CAPABLE_BACKENDS = frozenset({"linux_bwrap", "darwin_seatbelt"})
+# Superseded by datamodel.backend_hard_enforces_sole_egress -- the three
+# gate sites had already begun to drift apart.
 
 
 def _validate_os_env(spec: AgentSpec, result: ValidationResult) -> None:
@@ -533,18 +535,19 @@ def _validate_os_env(spec: AgentSpec, result: ValidationResult) -> None:
             "sandbox.type=none does not create a scratch tmpdir",
         )
 
-    if egress_rules and sandbox_type not in _EGRESS_CAPABLE_BACKENDS:
+    if egress_rules and not backend_hard_enforces_sole_egress(sandbox_type):
         result.add(
             "os_env.sandbox.egress_rules",
-            "os_env.sandbox.egress_rules requires sandbox.type=linux_bwrap "
-            "(Linux) or sandbox.type=darwin_seatbelt (macOS) for hard "
-            "enforcement of the network allow-list. "
+            "os_env.sandbox.egress_rules requires a sandbox backend that "
+            "hard-enforces sole egress - linux_bwrap or linux_landlock "
+            "(Linux), darwin_seatbelt (macOS) - for enforcement of the "
+            "network allow-list. "
             f"Got sandbox.type={sandbox_type!r}; the rules would be "
             "inert decoration on the policy and the agent would have "
             "unrestricted network access despite the YAML declaring otherwise. "
-            "Fix: set os_env.sandbox.type to linux_bwrap on Linux or "
-            "darwin_seatbelt on macOS; do not use sandbox.type=none with "
-            "egress_rules.",
+            "Fix: set os_env.sandbox.type to linux_landlock or linux_bwrap "
+            "on Linux, or darwin_seatbelt on macOS; do not use "
+            "sandbox.type=none with egress_rules.",
         )
 
 

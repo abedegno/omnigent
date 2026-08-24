@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, mo
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.inner.datamodel import (
+    backend_hard_enforces_sole_egress,
     DEFAULT_BASIC_USERNAME,
     CredentialProxyEntry,
     CredentialProxySpec,
@@ -961,20 +962,20 @@ def _parse_os_env_sandbox(
                 code=ErrorCode.INVALID_INPUT,
             )
         sandbox_type = _resolve_sandbox_type(raw_type)
-    if egress_rules and sandbox_type not in ("linux_bwrap", "darwin_seatbelt"):
+    if egress_rules and not backend_hard_enforces_sole_egress(sandbox_type):
         raise OmnigentError(
-            "os_env.sandbox.egress_rules requires sandbox.type=linux_bwrap "
-            "(Linux) or sandbox.type=darwin_seatbelt (macOS) for hard "
-            "network enforcement: those backends restrict network access "
-            "at spawn time so the MITM proxy is the only egress path. "
-            f"Got sandbox.type={sandbox_type!r}. "
-            "Fix: set os_env.sandbox.type to linux_bwrap on Linux or "
-            "darwin_seatbelt on macOS; do not use sandbox.type=none with "
-            "egress_rules.",
+            "os_env.sandbox.egress_rules requires a sandbox backend that "
+            "hard-enforces sole egress - linux_bwrap or linux_landlock "
+            "(Linux), darwin_seatbelt (macOS): those backends restrict "
+            "network access at spawn time so the MITM proxy is the only "
+            f"egress path. Got sandbox.type={sandbox_type!r}. "
+            "Fix: set os_env.sandbox.type to linux_landlock or linux_bwrap "
+            "on Linux, or darwin_seatbelt on macOS; do not use "
+            "sandbox.type=none with egress_rules.",
             code=ErrorCode.INVALID_INPUT,
         )
     credential_proxy = _parse_credential_proxy(raw.get("credential_proxy"))
-    if credential_proxy is not None and sandbox_type not in ("linux_bwrap", "darwin_seatbelt"):
+    if credential_proxy is not None and not backend_hard_enforces_sole_egress(sandbox_type):
         raise OmnigentError(
             "os_env.sandbox.credential_proxy requires sandbox.type=linux_bwrap "
             "(Linux) or sandbox.type=darwin_seatbelt (macOS) so credentials are "

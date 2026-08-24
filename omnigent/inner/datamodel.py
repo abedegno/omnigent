@@ -938,3 +938,34 @@ class LabelSchemaRule:
 
     def allows(self, new_value: str) -> bool:
         return new_value in self.values
+
+
+#: Sandbox backends that can guarantee the L7 egress proxy is the ONLY
+#: network path out — no raw socket around it.
+#:
+#: - ``linux_bwrap``: ``--unshare-net`` removes the network stack entirely;
+#:   the helper reaches the parent through a bind-mounted Unix socket.
+#: - ``darwin_seatbelt``: seatbelt denies outbound sockets at spawn time.
+#: - ``linux_landlock``: ABI 4+ TCP rights are handled with no NET_PORT rule,
+#:   denying every TCP bind and connect. AF_UNIX is outside Landlock's network
+#:   scope, so the bind-mounted egress socket still works.
+#:
+#: Landlock's guarantee is kernel-dependent in a way the other two are not:
+#: network rights need ABI >= 4. Spec-time validation cannot see the target
+#: kernel, so it accepts the type here and
+#: :meth:`omnigent.inner.landlock_sandbox.LandlockSandboxBackend.activate`
+#: REFUSES at spawn time if the kernel cannot deliver. Fail-closed at the
+#: point where the fact is knowable.
+SOLE_EGRESS_BACKENDS = frozenset({"linux_bwrap", "darwin_seatbelt", "linux_landlock"})
+
+
+def backend_hard_enforces_sole_egress(sandbox_type: str | None) -> bool:
+    """
+    Return True when *sandbox_type* can make the MITM proxy the only egress.
+
+    Single source of truth for the three call sites that gate
+    ``egress_rules`` (spec parser, spec validator, inner loader). They
+    previously hardcoded the backend list independently and had already
+    begun to drift — one used a named constant, two an inline tuple.
+    """
+    return sandbox_type in SOLE_EGRESS_BACKENDS
