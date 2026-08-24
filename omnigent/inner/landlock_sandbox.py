@@ -161,6 +161,8 @@ _LANDLOCK_CREATE_RULESET_VERSION = 1 << 0
 # backend handles the network rights and adds no port rule, which is
 # exactly what denies all TCP. A NET_PORT rule would ALLOW a port.
 _LANDLOCK_RULE_PATH_BENEATH = 1
+# ``LANDLOCK_RULE_NET_PORT`` (ABI 4). Grants an access right on ONE TCP port.
+_LANDLOCK_RULE_NET_PORT = 2
 
 # ``LANDLOCK_ACCESS_FS_*`` bits from ``include/uapi/linux/landlock.h``.
 # Defined explicitly (rather than via a header lookup) so the activation
@@ -244,6 +246,15 @@ _FS_FILE_BASE = (
 # content access) — exactly what ``landlock_add_rule`` wants for
 # ``path_beneath_attr.parent_fd``. O_CLOEXEC keeps the fd from leaking
 # into the eventual target exec.
+#: Device nodes every ordinary tool expects to be writable. bwrap mounts a
+#: fresh /dev inside its namespace so this never arises there; Landlock has no
+#: mounts, so without an explicit grant a write-confined session cannot open
+#: /dev/null -- and the failure surfaces far from its cause (git ls-remote
+#: reports "could not open '/dev/null'" and says nothing about the network).
+#: None of these is a security boundary: /dev/null discards writes, and
+#: /dev/zero and /dev/urandom are read sources.
+_DEVICE_NODES = ("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom")
+
 _O_PATH = 0o10000000
 _O_CLOEXEC = 0o2000000
 
@@ -268,6 +279,27 @@ class _LandlockRulesetAttr(ctypes.Structure):
         ("handled_access_fs", ctypes.c_uint64),
         ("handled_access_net", ctypes.c_uint64),
         ("scoped", ctypes.c_uint64),
+    )
+
+
+class _LandlockNetPortAttr(ctypes.Structure):
+    """
+    ``struct landlock_net_port_attr`` (uapi, ABI 4).
+
+    ``allowed_access`` (u64) must be a subset of the ruleset's
+    ``handled_access_net``. ``port`` (u64) is a host-byte-order TCP port.
+
+    NOTE the matching granularity: Landlock net rules match on PORT ONLY,
+    never on address. Granting connect on the relay's port therefore permits
+    connecting to that port number on any host, not merely on loopback. The
+    port is randomly assigned per session, which limits the practical reach,
+    but it is a real residual and is recorded as one rather than glossed.
+    """
+
+    _pack_ = 1
+    _fields_ = (
+        ("allowed_access", ctypes.c_uint64),
+        ("port", ctypes.c_uint64),
     )
 
 
@@ -601,7 +633,13 @@ class LandlockSandboxBackend(SandboxBackend):
             return
         _create_ruleset, add_rule, restrict_self = numbers
 
-        net_handled = _net_mask_for_abi(abi)
+        # Only confine the network when egress confinement was actually
+        # requested. Computing this unconditionally denied all TCP for every
+        # landlock sandbox on an ABI 4+ kernel, including ordinary sessions
+        # with no egress_rules, which then could not reach their own model
+        # provider. Landlock's filesystem confinement must not silently
+        # bring network confinement with it.
+        net_handled = _net_mask_for_abi(abi) if sole_egress else 0
 
         read_mask = _fs_read_mask_for_abi(abi)
         write_mask = _fs_write_mask_for_abi(abi)
@@ -658,6 +696,14 @@ class LandlockSandboxBackend(SandboxBackend):
             for path in policy.write_files:
                 _add_path_rule(libc, add_rule, ruleset_fd, path, file_mask & handled, file_mask)
 
+            # Device nodes: always granted. See _DEVICE_NODES -- these are not
+            # a boundary, and denying them breaks ordinary tooling in ways that
+            # are misdiagnosed as network failures.
+            for node in _DEVICE_NODES:
+                _add_path_rule(
+                    libc, add_rule, ruleset_fd, Path(node), file_mask & handled, file_mask
+                )
+
             # Read roots: grant the read class only (intersected with the
             # handled mask). Skipped entirely when reads are unrestricted
             # — there is nothing to re-allow because reads aren't handled.
@@ -666,6 +712,38 @@ class LandlockSandboxBackend(SandboxBackend):
                     _add_path_rule(
                         libc, add_rule, ruleset_fd, path, read_mask & handled, file_mask
                     )
+
+            # Egress: grant TCP connect on the relay's port, and ONLY that
+            # port. Without this rule the sandbox denies every TCP connect
+            # including the one to its own egress relay, so nothing can reach
+            # the proxy and the session has no network at all -- which looks
+            # identical to a working boundary on every check except a control
+            # that expects legitimate traffic to succeed.
+            #
+            # Landlock matches net rules by port, never by address, so this
+            # also permits that port number on other hosts. The port is
+            # randomly assigned per session; the residual is real but narrow.
+            if sole_egress and policy.egress_relay_port is not None:
+                _add_net_port_rule(
+                    libc,
+                    add_rule,
+                    ruleset_fd,
+                    policy.egress_relay_port,
+                    _LANDLOCK_ACCESS_NET_CONNECT_TCP,
+                )
+
+            # Start the relay BEFORE restricting, because restriction denies
+            # NET_BIND_TCP and there is no network namespace here to bind
+            # inside. bwrap can start its relay after applying seccomp -- its
+            # isolation comes from --unshare-net, not from denying bind -- so
+            # the ordering that is correct there is wrong here.
+            if sole_egress and policy.egress_socket_path is not None:
+                from omnigent.inner.egress.relay import start_relay
+
+                start_relay(
+                    policy.egress_relay_port,
+                    policy.egress_socket_path,
+                )
 
             _set_no_new_privs(libc)
 
@@ -690,6 +768,41 @@ class LandlockSandboxBackend(SandboxBackend):
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _add_net_port_rule(
+    libc: ctypes.CDLL,
+    add_rule_nr: int,
+    ruleset_fd: int,
+    port: int,
+    allowed_access: int,
+) -> None:
+    """
+    Add one ``LANDLOCK_RULE_NET_PORT`` rule granting *allowed_access* on *port*.
+
+    Fail-loud: a sandbox that denies all TCP and then fails to grant the one
+    port its egress relay listens on has no working egress path at all, and
+    the session would appear "secured" while simply being unable to reach
+    anything. That failure mode is indistinguishable from success on every
+    check except a control that expects legitimate traffic to succeed.
+    """
+    attr = _LandlockNetPortAttr(allowed_access=allowed_access, port=port)
+    ctypes.set_errno(0)
+    rc = int(
+        libc.syscall(
+            add_rule_nr,
+            ruleset_fd,
+            _LANDLOCK_RULE_NET_PORT,
+            ctypes.byref(attr),
+            0,
+        )
+    )
+    if rc != 0:
+        err = ctypes.get_errno()
+        raise OSError(
+            err,
+            f"landlock_add_rule(NET_PORT, port={port}) failed: {os.strerror(err)}",
+        )
 
 
 def _add_path_rule(
