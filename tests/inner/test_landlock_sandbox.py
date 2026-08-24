@@ -40,10 +40,13 @@ from omnigent.inner.landlock_sandbox import (
     _LANDLOCK_ACCESS_FS_REFER,
     _LANDLOCK_ACCESS_FS_TRUNCATE,
     _LANDLOCK_ACCESS_FS_WRITE_FILE,
+    _LANDLOCK_ACCESS_NET_BIND_TCP,
+    _LANDLOCK_ACCESS_NET_CONNECT_TCP,
     LandlockSandboxBackend,
     _add_path_rule,
     _fs_file_mask_for_abi,
     _fs_write_mask_for_abi,
+    _net_mask_for_abi,
     detect_landlock_abi,
 )
 from omnigent.inner.sandbox import (
@@ -539,3 +542,167 @@ def test_enforcement_via_resolve_and_activate_helpers(tmp_path: Path) -> None:
     result = _run_probe(body)
     assert "error" not in result, f"child raised: {result.get('error')}"
     assert result["outside"] == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# Network confinement (sole egress)
+# ---------------------------------------------------------------------------
+
+
+def _egress_policy(*, egress: bool, tmp: Path) -> SandboxPolicy:
+    """Minimal policy; ``egress_relay_port`` is what selects sole-egress."""
+    return SandboxPolicy(
+        backend_type="linux_landlock",
+        active=True,
+        read_roots=None,
+        write_roots=[tmp],
+        write_files=[],
+        allow_network=True,
+        egress_relay_port=1080 if egress else None,
+        egress_socket_path="/run/oa-egress.sock" if egress else None,
+    )
+
+
+def test_net_mask_clamps_below_abi_4() -> None:
+    """
+    NET_BIND_TCP / NET_CONNECT_TCP arrived in ABI 4. Passing them to an
+    older kernel would fail ``landlock_create_ruleset`` with EINVAL, the
+    same reason the filesystem masks clamp.
+    """
+    assert _net_mask_for_abi(3) == 0
+    assert _net_mask_for_abi(4) & _LANDLOCK_ACCESS_NET_CONNECT_TCP
+    assert _net_mask_for_abi(4) & _LANDLOCK_ACCESS_NET_BIND_TCP
+    # Monotonic, like the fs masks.
+    assert _net_mask_for_abi(4) & _net_mask_for_abi(6) == _net_mask_for_abi(4)
+
+
+def test_egress_refuses_when_landlock_is_unavailable(tmp_path: Path) -> None:
+    """
+    Fail closed. The documented degrade-open is correct for filesystem
+    confinement and catastrophic here: it would hand the session an open
+    network while the caller believes the proxy is the only route out.
+    """
+    backend = LandlockSandboxBackend()
+    with patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=None):
+        with pytest.raises(ValueError, match="only network path"):
+            backend.activate(_egress_policy(egress=True, tmp=tmp_path))
+
+
+def test_egress_refuses_below_abi_4(tmp_path: Path) -> None:
+    """
+    A kernel with Landlock but no network rights must REFUSE, not enforce
+    the filesystem half alone — that would leave the session networked
+    while it believes it is confined.
+    """
+    backend = LandlockSandboxBackend()
+    with patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=3):
+        with pytest.raises(ValueError, match="ABI 3"):
+            backend.activate(_egress_policy(egress=True, tmp=tmp_path))
+
+
+def test_without_egress_unavailable_landlock_still_degrades_open(
+    tmp_path: Path,
+) -> None:
+    """
+    Regression guard on the change above: adding fail-closed egress must
+    not turn the filesystem-only path into a hard failure on kernels
+    without Landlock. That behaviour is deliberate and documented.
+    """
+    backend = LandlockSandboxBackend()
+    with patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=None):
+        backend.activate(_egress_policy(egress=False, tmp=tmp_path))  # must not raise
+
+
+def test_egress_refuses_on_unsupported_architecture(tmp_path: Path) -> None:
+    """
+    The third fail-open path. ``_landlock_syscall_numbers`` returns None on
+    architectures the backend has no syscall table for, and the method
+    returns early — which under sole-egress would leave the session
+    networked. Found by a test that could not reach the ABI check on a
+    non-x86_64/aarch64 host.
+    """
+    backend = LandlockSandboxBackend()
+    with (
+        patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=6),
+        patch(
+            "omnigent.inner.landlock_sandbox._landlock_syscall_numbers",
+            return_value=None,
+        ),
+    ):
+        with pytest.raises(ValueError, match="architecture"):
+            backend.activate(_egress_policy(egress=True, tmp=tmp_path))
+
+
+def test_without_egress_unsupported_architecture_still_degrades_open(
+    tmp_path: Path,
+) -> None:
+    """Counterpart: the filesystem-only path keeps its documented behaviour."""
+    backend = LandlockSandboxBackend()
+    with (
+        patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=6),
+        patch(
+            "omnigent.inner.landlock_sandbox._landlock_syscall_numbers",
+            return_value=None,
+        ),
+    ):
+        backend.activate(_egress_policy(egress=False, tmp=tmp_path))  # must not raise
+
+
+def test_activate_handles_tcp_rights_and_adds_no_net_rule(tmp_path: Path) -> None:
+    """
+    The test that binds the actual enforcement.
+
+    Everything above checks refusals; none of them would notice if
+    ``handled_access_net`` were never assigned — the sandbox would build a
+    ruleset that confines the filesystem and silently permits all TCP,
+    with the whole suite green. So capture the struct handed to
+    ``landlock_create_ruleset`` and assert both TCP rights are handled,
+    and that NO net rule is added (a NET_PORT rule would ALLOW a port).
+    """
+    captured: dict[str, int] = {}
+    rule_types: list[int] = []
+
+    class _FakeLibc:
+        def syscall(self, number: int, *args: object) -> int:
+            create, add_rule, restrict_self = 444, 445, 446
+            if number == create:
+                attr = args[0]._obj  # type: ignore[attr-defined]
+                captured["fs"] = attr.handled_access_fs
+                captured["net"] = attr.handled_access_net
+                return 3  # a plausible ruleset fd
+            if number == add_rule:
+                rule_types.append(int(args[1]))  # type: ignore[arg-type]
+                return 0
+            if number == restrict_self:
+                return 0
+            return 0
+
+        def prctl(self, *args: object) -> int:
+            return 0
+
+    policy = SandboxPolicy(
+        backend_type="linux_landlock",
+        active=True,
+        read_roots=None,
+        write_roots=[],  # no path rules, so add_rule is only ever net
+        write_files=[],
+        allow_network=True,
+        egress_relay_port=1080,
+        egress_socket_path="/run/oa-egress.sock",
+    )
+
+    backend = LandlockSandboxBackend()
+    with (
+        patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=6),
+        patch(
+            "omnigent.inner.landlock_sandbox._landlock_syscall_numbers",
+            return_value=(444, 445, 446),
+        ),
+        patch("ctypes.CDLL", return_value=_FakeLibc()),
+        patch("os.close"),
+    ):
+        backend.activate(policy)
+
+    assert captured["net"] & _LANDLOCK_ACCESS_NET_CONNECT_TCP, "TCP connect not handled"
+    assert captured["net"] & _LANDLOCK_ACCESS_NET_BIND_TCP, "TCP bind not handled"
+    assert not rule_types, "a net rule was added; that would ALLOW a port"

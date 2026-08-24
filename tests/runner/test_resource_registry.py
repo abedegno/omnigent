@@ -1348,6 +1348,8 @@ async def test_blocked_reason_rides_pane_edges(tmp_path: Path) -> None:
     poller.emit("running", None)
     await asyncio.sleep(0)
     assert edges == [("running", "permission prompt"), ("running", None)]
+
+
 # ── native bridge-dir reaping: live-session regression ──────────────────────
 
 

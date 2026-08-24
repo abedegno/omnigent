@@ -691,13 +691,16 @@ class OSEnvSandboxSpec:
     # Each rule is a string in the DSL: ``"METHODS host/path/glob"``
     # (e.g. ``"GET api.github.com/repos/org/**"``). Default deny —
     # requests not matching any rule are blocked with HTTP 403.
-    # Requires a backend that can hard-enforce network isolation at
-    # spawn time so the MITM proxy is the only egress path. Both
-    # ``linux_bwrap`` (isolated network namespace via
-    # ``--unshare-net``) and ``darwin_seatbelt`` (SBPL
-    # ``(deny network*)`` with narrow allows for the loopback relay
-    # and the parent's Unix socket) satisfy this. The parser rejects
-    # ``egress_rules`` on every other backend type.
+    # Requires a backend that can enforce the allow-list at spawn time.
+    # ``linux_bwrap`` (isolated network namespace via ``--unshare-net``)
+    # and ``darwin_seatbelt`` (SBPL ``(deny network*)`` with narrow
+    # allows for the loopback relay and the parent's Unix socket) make
+    # the MITM proxy the only egress path for EVERY transport.
+    # ``linux_landlock`` enforces it for TCP only -- UDP, raw sockets and
+    # other families are outside Landlock's scope -- which covers HTTP(S)
+    # but is not a complete network boundary. The parser rejects
+    # ``egress_rules`` on every other backend type. See
+    # ``EGRESS_CAPABLE_BACKENDS`` / ``TCP_ONLY_EGRESS_BACKENDS``.
     egress_rules: list[str] | None = None
     # When ``False`` (the default), the egress proxy refuses to
     # open upstream connections to addresses that are not globally
@@ -938,3 +941,58 @@ class LabelSchemaRule:
 
     def allows(self, new_value: str) -> bool:
         return new_value in self.values
+
+
+#: Backends that remove the network stack entirely, so the L7 egress proxy is
+#: the only path out for EVERY transport.
+#:
+#: - ``linux_bwrap``: ``--unshare-net`` leaves no network namespace at all;
+#:   the helper reaches the parent through a bind-mounted Unix socket.
+#: - ``darwin_seatbelt``: seatbelt denies outbound sockets at spawn time.
+COMPLETE_EGRESS_BACKENDS = frozenset({"linux_bwrap", "darwin_seatbelt"})
+
+#: Backends that enforce the egress allow-list for TCP ONLY.
+#:
+#: ``linux_landlock`` handles the ABI 4+ TCP rights with no ``NET_PORT`` rule,
+#: which denies every new IPv4/IPv6 TCP bind and connect while leaving
+#: ``AF_UNIX`` usable. It does **not** restrict UDP, ICMP or other raw
+#: sockets, SCTP, ``AF_VSOCK``, or a socket already connected before
+#: ``landlock_restrict_self``. Landlock has no rule type for those.
+#:
+#: This is a strictly weaker guarantee than the complete backends, and it is
+#: kept separate so nothing can quietly describe the two as equivalent. HTTP(S)
+#: egress -- what ``egress_rules`` and ``credential_proxy`` actually govern --
+#: is TCP, so the allow-list is enforced for the traffic it describes; a
+#: non-TCP transport is outside the policy entirely and callers must know that.
+TCP_ONLY_EGRESS_BACKENDS = frozenset({"linux_landlock"})
+
+#: Every backend that can enforce ``egress_rules`` at all.
+EGRESS_CAPABLE_BACKENDS = COMPLETE_EGRESS_BACKENDS | TCP_ONLY_EGRESS_BACKENDS
+
+
+def backend_can_enforce_egress_rules(sandbox_type: str | None) -> bool:
+    """
+    Return True when *sandbox_type* can enforce the egress allow-list.
+
+    Single source of truth for the five call sites that gate ``egress_rules``
+    and ``credential_proxy`` (spec parser, spec validator, inner loader). They
+    previously hardcoded the backend list independently and had begun to
+    drift.
+
+    This deliberately does NOT promise the proxy is the only egress path for
+    every transport -- see :func:`backend_egress_is_tcp_only`. An earlier
+    version of this predicate was named ``backend_hard_enforces_sole_egress``
+    and returned True for Landlock, which claimed a guarantee Landlock cannot
+    make.
+    """
+    return sandbox_type in EGRESS_CAPABLE_BACKENDS
+
+
+def backend_egress_is_tcp_only(sandbox_type: str | None) -> bool:
+    """
+    Return True when the backend enforces egress for TCP only.
+
+    Callers that need a complete network boundary -- rather than an enforced
+    HTTP(S) allow-list -- must treat True as "not sufficient".
+    """
+    return sandbox_type in TCP_ONLY_EGRESS_BACKENDS

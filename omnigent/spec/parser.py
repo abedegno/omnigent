@@ -23,6 +23,7 @@ from omnigent.inner.datamodel import (
     OSEnvSandboxSpec,
     OSEnvSpec,
     TerminalEnvSpec,
+    backend_can_enforce_egress_rules,
 )
 from omnigent.spec.types import (
     DEFAULT_ASK_TIMEOUT,
@@ -961,24 +962,26 @@ def _parse_os_env_sandbox(
                 code=ErrorCode.INVALID_INPUT,
             )
         sandbox_type = _resolve_sandbox_type(raw_type)
-    if egress_rules and sandbox_type not in ("linux_bwrap", "darwin_seatbelt"):
+    if egress_rules and not backend_can_enforce_egress_rules(sandbox_type):
         raise OmnigentError(
-            "os_env.sandbox.egress_rules requires sandbox.type=linux_bwrap "
-            "(Linux) or sandbox.type=darwin_seatbelt (macOS) for hard "
-            "network enforcement: those backends restrict network access "
-            "at spawn time so the MITM proxy is the only egress path. "
+            "os_env.sandbox.egress_rules requires a sandbox backend that can "
+            "enforce it: linux_bwrap (Linux) or darwin_seatbelt (macOS), "
+            "which remove the network stack so the MITM proxy is the only "
+            "path out for every transport; or linux_landlock (Linux), which "
+            "denies TCP only and leaves UDP and raw sockets unrestricted. "
             f"Got sandbox.type={sandbox_type!r}. "
-            "Fix: set os_env.sandbox.type to linux_bwrap on Linux or "
-            "darwin_seatbelt on macOS; do not use sandbox.type=none with "
-            "egress_rules.",
+            "Fix: set os_env.sandbox.type to linux_bwrap or linux_landlock "
+            "on Linux, or darwin_seatbelt on macOS; do not use "
+            "sandbox.type=none with egress_rules.",
             code=ErrorCode.INVALID_INPUT,
         )
     credential_proxy = _parse_credential_proxy(raw.get("credential_proxy"))
-    if credential_proxy is not None and sandbox_type not in ("linux_bwrap", "darwin_seatbelt"):
+    if credential_proxy is not None and not backend_can_enforce_egress_rules(sandbox_type):
         raise OmnigentError(
-            "os_env.sandbox.credential_proxy requires sandbox.type=linux_bwrap "
-            "(Linux) or sandbox.type=darwin_seatbelt (macOS) so credentials are "
-            "bound to a hardened helper boundary. "
+            "os_env.sandbox.credential_proxy requires a sandbox backend that "
+            "can enforce egress: linux_bwrap (Linux) or darwin_seatbelt "
+            "(macOS), or linux_landlock (Linux, TCP only), so credentials "
+            "are bound to a hardened helper boundary. "
             f"Got sandbox.type={sandbox_type!r}.",
             code=ErrorCode.INVALID_INPUT,
         )
