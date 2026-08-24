@@ -49,6 +49,12 @@ _LAUNCHER_PRIVATE_TMPDIR_ENV = "OMNIGENT_LAUNCHER_SPAWN_PRIVATE_TMPDIR"
 # doesn't need a wrap.
 _SPAWN_WRAP_BACKENDS = frozenset({"linux_bwrap", "darwin_seatbelt"})
 
+#: Backends where ``SandboxPolicy.read_roots is None`` means reads are
+#: UNRESTRICTED rather than "nothing granted". These confine writes by default
+#: and handle the read class only when the spec restricts reads, so read grants
+#: are meaningless until the spec opts into read confinement.
+_READS_UNRESTRICTED_WHEN_UNSET = frozenset({"linux_landlock"})
+
 
 def _json_string_list(values: Sequence[object]) -> list[JsonValue]:
     return cast(list[JsonValue], [str(value) for value in values])
@@ -598,12 +604,26 @@ def with_additional_read_roots(
     policy: SandboxPolicy,
     extra_roots: Sequence[Path],
 ) -> SandboxPolicy:
-    # ``read_roots=None`` means "no spec-supplied grants" for deny-default
-    # backends (darwin_seatbelt, linux_bwrap). Treat it as an empty list so
-    # caller-supplied extra roots (e.g. the pi node_modules dir granted by
-    # _try_sandbox_pi) are not silently dropped when the spec declares no
-    # read_paths. Do NOT short-circuit: the caller is explicitly widening the
-    # policy, so we must honour it even when the spec itself has no grants.
+    # ``read_roots=None`` carries OPPOSITE meanings depending on the backend,
+    # and conflating them silently denies the filesystem.
+    #
+    # Deny-default backends (darwin_seatbelt, linux_bwrap): None means "no
+    # spec-supplied grants". Treat it as an empty list so caller-supplied extra
+    # roots (e.g. the pi node_modules dir granted by _try_sandbox_pi) are not
+    # silently dropped when the spec declares no read_paths. Do NOT
+    # short-circuit there: the caller is explicitly widening the policy.
+    #
+    # Allow-default-reads backends (linux_landlock): None means reads are
+    # UNRESTRICTED -- the backend handles the read class only when the spec
+    # restricts reads. Adding roots cannot widen "everything"; it would flip
+    # reads to an allow-list of just the supplied paths, putting EXECUTE in the
+    # handled mask and denying every unlisted path. That is a NARROWING, and it
+    # broke a real session: claude_sdk_executor adds six internal roots, after
+    # which the CLI could not exec its own binary at /usr/local/bin/claude.
+    # Reads are already permitted, so the correct result is the policy unchanged.
+    if policy.read_roots is None and policy.backend_type in _READS_UNRESTRICTED_WHEN_UNSET:
+        return policy
+
     read_roots = list(policy.read_roots) if policy.read_roots is not None else []
     for root in extra_roots:
         resolved = root.resolve(strict=False)
