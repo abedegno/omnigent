@@ -737,7 +737,10 @@ class LandlockSandboxBackend(SandboxBackend):
             # inside. bwrap can start its relay after applying seccomp -- its
             # isolation comes from --unshare-net, not from denying bind -- so
             # the ordering that is correct there is wrong here.
-            if sole_egress and policy.egress_socket_path is not None:
+            # Both attributes checked directly rather than via `sole_egress`:
+            # the type checker cannot narrow `int | None` through an
+            # intermediate boolean, and this matches bwrap_sandbox.py's idiom.
+            if policy.egress_relay_port is not None and policy.egress_socket_path is not None:
                 from omnigent.inner.egress.relay import start_relay
 
                 start_relay(
