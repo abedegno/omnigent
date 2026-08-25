@@ -648,33 +648,98 @@ def test_without_egress_unsupported_architecture_still_degrades_open(
         backend.activate(_egress_policy(egress=False, tmp=tmp_path))  # must not raise
 
 
-def test_activate_handles_tcp_rights_and_adds_no_net_rule(tmp_path: Path) -> None:
-    """
-    The test that binds the actual enforcement.
+def test_activate_grants_only_the_relay_port_and_starts_the_relay() -> None:
+    """The test that binds the actual enforcement.
 
-    Everything above checks refusals; none of them would notice if
-    ``handled_access_net`` were never assigned — the sandbox would build a
-    ruleset that confines the filesystem and silently permits all TCP,
-    with the whole suite green. So capture the struct handed to
-    ``landlock_create_ruleset`` and assert both TCP rights are handled,
-    and that NO net rule is added (a NET_PORT rule would ALLOW a port).
+    An earlier version asserted NO net rule was added, which encoded a broken
+    design: denying every TCP connect without granting the relay's port leaves
+    the sandbox unable to reach its own egress proxy, so the session has no
+    network at all. That state passes every "is the mutation denied?" check
+    and is only distinguishable by a control expecting legitimate traffic to
+    work.
+
+    So: both TCP rights handled, EXACTLY ONE net rule, on the relay port, and
+    the relay started BEFORE restriction (restriction denies NET_BIND_TCP, and
+    there is no network namespace here to bind inside).
     """
     captured: dict[str, int] = {}
-    rule_types: list[int] = []
+    net_rules: list[tuple[int, int]] = []
+    order: list[str] = []
 
     class _FakeLibc:
         def syscall(self, number: int, *args: object) -> int:
-            create, add_rule, restrict_self = 444, 445, 446
-            if number == create:
+            if number == 444:
                 attr = args[0]._obj  # type: ignore[attr-defined]
-                captured["fs"] = attr.handled_access_fs
                 captured["net"] = attr.handled_access_net
-                return 3  # a plausible ruleset fd
-            if number == add_rule:
-                rule_types.append(int(args[1]))  # type: ignore[arg-type]
+                return 3
+            if number == 445:
+                if int(args[1]) == 2:  # LANDLOCK_RULE_NET_PORT
+                    a = args[2]._obj  # type: ignore[attr-defined]
+                    net_rules.append((int(a.port), int(a.allowed_access)))
                 return 0
-            if number == restrict_self:
+            if number == 446:
+                order.append("restrict")
                 return 0
+            return 0
+
+        def prctl(self, *args: object) -> int:
+            return 0
+
+    def _fake_start_relay(port: int, sock: str) -> None:
+        order.append("relay")
+
+    policy = SandboxPolicy(
+        backend_type="linux_landlock",
+        active=True,
+        read_roots=None,
+        write_roots=[],
+        write_files=[],
+        allow_network=True,
+        egress_relay_port=37475,
+        egress_socket_path="/run/oa-egress.sock",
+    )
+
+    backend = LandlockSandboxBackend()
+    with (
+        patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=6),
+        patch(
+            "omnigent.inner.landlock_sandbox._landlock_syscall_numbers",
+            return_value=(444, 445, 446),
+        ),
+        patch("ctypes.CDLL", return_value=_FakeLibc()),
+        patch("omnigent.inner.egress.relay.start_relay", _fake_start_relay),
+        patch("os.close"),
+    ):
+        backend.activate(policy)
+
+    assert captured["net"] & _LANDLOCK_ACCESS_NET_CONNECT_TCP, "TCP connect not handled"
+    assert captured["net"] & _LANDLOCK_ACCESS_NET_BIND_TCP, "TCP bind not handled"
+    assert net_rules == [(37475, _LANDLOCK_ACCESS_NET_CONNECT_TCP)], (
+        f"expected exactly one connect grant on the relay port, got {net_rules!r}"
+    )
+    assert order == ["relay", "restrict"], (
+        f"relay must start BEFORE restrict_self (bind is denied after), got {order!r}"
+    )
+
+
+def test_no_egress_policy_leaves_network_unhandled(tmp_path: Path) -> None:
+    """A landlock sandbox that did NOT ask for egress confinement must not
+    restrict the network at all.
+
+    Regression: net rights were computed and applied unconditionally, so every
+    landlock sandbox on an ABI 4+ kernel denied all TCP -- including sessions
+    with no egress_rules, which then could not reach their own model provider.
+    The existing test used a policy WITH egress_relay_port set and so could not
+    see it: the guard bound the wrong half of the condition.
+    """
+    captured: dict[str, int] = {}
+
+    class _FakeLibc:
+        def syscall(self, number: int, *args: object) -> int:
+            if number == 444:
+                attr = args[0]._obj  # type: ignore[attr-defined]
+                captured["net"] = attr.handled_access_net
+                return 3
             return 0
 
         def prctl(self, *args: object) -> int:
@@ -684,11 +749,10 @@ def test_activate_handles_tcp_rights_and_adds_no_net_rule(tmp_path: Path) -> Non
         backend_type="linux_landlock",
         active=True,
         read_roots=None,
-        write_roots=[],  # no path rules, so add_rule is only ever net
+        write_roots=[],
         write_files=[],
         allow_network=True,
-        egress_relay_port=1080,
-        egress_socket_path="/run/oa-egress.sock",
+        egress_relay_port=None,  # no egress confinement requested
     )
 
     backend = LandlockSandboxBackend()
@@ -703,6 +767,59 @@ def test_activate_handles_tcp_rights_and_adds_no_net_rule(tmp_path: Path) -> Non
     ):
         backend.activate(policy)
 
-    assert captured["net"] & _LANDLOCK_ACCESS_NET_CONNECT_TCP, "TCP connect not handled"
-    assert captured["net"] & _LANDLOCK_ACCESS_NET_BIND_TCP, "TCP bind not handled"
-    assert not rule_types, "a net rule was added; that would ALLOW a port"
+    assert captured["net"] == 0, (
+        "network rights were handled without egress confinement being requested; "
+        "this denies all TCP for an ordinary landlock sandbox"
+    )
+
+
+def test_activate_grants_the_standard_device_nodes() -> None:
+    """/dev/null and friends must stay writable under write confinement.
+
+    bwrap mounts a fresh /dev inside its namespace, so this never arises
+    there. Landlock has no mounts: if the policy's write roots don't cover
+    /dev, then writing to /dev/null is denied and ordinary tooling breaks in
+    ways that look like network failures. git ls-remote, for instance, exits
+    with "could not open '/dev/null'" and reports nothing about the network.
+
+    These nodes are not a security boundary -- /dev/null discards, /dev/zero
+    and /dev/urandom are read sources -- so granting them costs nothing the
+    sandbox was protecting.
+    """
+    granted: list[str] = []
+
+    class _FakeLibc:
+        def syscall(self, number: int, *args: object) -> int:
+            return 3 if number == 444 else 0
+
+        def prctl(self, *args: object) -> int:
+            return 0
+
+    def _record(libc, add_rule_nr, ruleset_fd, path, allowed, file_mask):
+        granted.append(str(path))
+
+    policy = SandboxPolicy(
+        backend_type="linux_landlock",
+        active=True,
+        read_roots=None,
+        write_roots=[Path("/workspaces")],
+        write_files=[],
+        allow_network=True,
+    )
+
+    backend = LandlockSandboxBackend()
+    with (
+        patch("omnigent.inner.landlock_sandbox.detect_landlock_abi", return_value=6),
+        patch(
+            "omnigent.inner.landlock_sandbox._landlock_syscall_numbers",
+            return_value=(444, 445, 446),
+        ),
+        patch("ctypes.CDLL", return_value=_FakeLibc()),
+        patch("omnigent.inner.landlock_sandbox._add_path_rule", _record),
+        patch("os.close"),
+    ):
+        backend.activate(policy)
+
+    assert "/dev/null" in granted, (
+        f"/dev/null was not granted; writes to it are denied. granted={granted!r}"
+    )
