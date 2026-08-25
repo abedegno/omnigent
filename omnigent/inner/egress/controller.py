@@ -236,8 +236,12 @@ def start_egress_proxy(
     #
     # On Linux bwrap this happens INSIDE the network namespace
     # which is empty, so the bind always succeeds and the race
-    # doesn't apply. On macOS seatbelt the bind shares the host's
-    # loopback so the race window matters.
+    # doesn't apply. On macOS seatbelt and Linux landlock the bind
+    # shares the host's loopback, so the race window matters for both:
+    # neither creates a network namespace. Landlock additionally grants
+    # NET_PORT connect on this port, and Landlock matches by port and
+    # never by address, so the grant also permits this port number on
+    # other hosts -- see landlock_sandbox._LandlockNetPortAttr.
     sock_probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     try:
         sock_probe.bind(("127.0.0.1", 0))

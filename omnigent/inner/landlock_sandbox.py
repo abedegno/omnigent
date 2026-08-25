@@ -290,8 +290,13 @@ class _LandlockNetPortAttr(ctypes.Structure):
     ``handled_access_net``. ``port`` (u64) is a host-byte-order TCP port.
 
     NOTE the matching granularity: Landlock net rules match on PORT ONLY,
-    never on address. Granting connect on the relay's port therefore permits
-    connecting to that port number on any host, not merely on loopback. The
+    never on address. The relay's port is chosen by the parent's
+    bind-and-close probe (egress/controller.py), which shares the host's
+    loopback here exactly as darwin_seatbelt does -- start_relay's bind is
+    fail-loud if the sub-millisecond race is lost, so a collision aborts the
+    helper rather than running it unprotected. Granting connect on the
+    relay's port therefore permits connecting to that port number on any
+    host, not merely on loopback. The
     port is randomly assigned per session, which limits the practical reach,
     but it is a real residual and is recorded as one rather than glossed.
     """
