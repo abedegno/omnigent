@@ -228,16 +228,8 @@ RUN apt-get update \
 # poppler-utils -> pdftotext/pdfinfo/pdfimages; file; jq; qpdf; unzip;
 # libimage-exiftool-perl -> exiftool; sqlite3; tesseract-ocr(+eng) -> OCR.
 # ripgrep -> rg (BL-12 #4); dnsutils -> dig/host/nslookup + whois (infra leads, BL-2 follow-up).
-# gh via the official apt repo so coding sub-agents' `gh pr create` resolves from the
-# image's default PATH (retires the /root/bin/gh workaround). Separate RUN: needs its repo.
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
- && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
- && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      > /etc/apt/sources.list.d/github-cli.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends gh \
- && rm -rf /var/lib/apt/lists/*
+# gh: installed further down by upstream (checksum-pinned into /usr/local/bin),
+# which retires the fork's own apt-repo install.
 
 # OpenShell-required non-root user (see the header note). UID/GID in the high
 # range per OpenShell's bring-your-own-container guidance, so that without
